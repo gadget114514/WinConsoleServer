@@ -14,6 +14,7 @@
 #include "terminal/include/TerminalView.h"
 #include "remote_session.h"
 #include "resource.h"
+#include "../common/version.h"
 
 #include <cwchar>
 #include <memory>

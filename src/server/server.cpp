@@ -1,5 +1,6 @@
 #include "server.h"
 #include "session.h"
+#include "../common/version.h"
 
 #include <algorithm>
 #include <cstdio>

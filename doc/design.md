@@ -433,7 +433,7 @@ type (u16) | length (u32) | value (length bytes)
 |-----|----|------|
 | 0x0000 | MAGIC | 4 バイト `"WCSP"`。必須 |
 | 0x0001 | VERSION | `u16 major, u16 minor`。v1.0 = `1,0` |
-| 0x0002 | CLIENT_NAME | UTF-8。例 `WinConsoleTerminal/0.1` |
+| 0x0002 | CLIENT_NAME | UTF-8。例 `WinConsoleTerminal/0.2.0` |
 | 0x0003 | FEATURES | `u32` 機能ビット |
 | 0x0004 | SIZE | `u16 cols, u16 rows` (1..1000) |
 | 0x0005 | SHELL | UTF-8。空ならサーバ既定。許可リスト照合 |
@@ -1130,7 +1130,7 @@ WinConsoleServer/
 | 3 | `echo` を送って OUTPUT を受ける | マーカー文字列が返る |
 | 4 | `RESIZE` を送る | `RESIZED` が返り、値が一致 |
 | 5 | クライアント GUI で接続 | プロンプトが表示され、入力できる |
-| 6 | インストーラをビルド | `dist\WinConsoleServerSetup-0.1.0.exe` が生成される |
+| 6 | インストーラをビルド | `dist\WinConsoleServerSetup-0.2.0.exe` が生成される |
 | 7 | 未実装項目を 1 つずつ追加 | 16.11 の受け入れ条件を満たす |
 
 ### 16.4 プロトコル実装の詳細
@@ -1502,7 +1502,7 @@ bin\Release\
   tests\test_protocol.exe
   tests\test_frame_reader.exe
 dist\
-  WinConsoleServerSetup-0.1.0.exe
+  WinConsoleServerSetup-0.2.0.exe
 ```
 
 #### 16.8.4 トラブルシューティング
@@ -1519,7 +1519,7 @@ dist\
 ### 16.9 インストーラ (Inno Setup 6)
 
 - スクリプト: `installer/WinConsoleServer.iss`
-- 出力: `dist/WinConsoleServerSetup-0.1.0.exe`
+- 出力: `dist/WinConsoleServerSetup-0.2.0.exe`
 - インストール先: `{autopf}\WinConsoleServer` (通常 `C:\Program Files\WinConsoleServer`)
 - 同梱物:
   - `WinConsoleServer.exe`
@@ -1534,7 +1534,7 @@ dist\
 - サイレントインストール:
 
 ```powershell
-.\dist\WinConsoleServerSetup-0.1.0.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+.\dist\WinConsoleServerSetup-0.2.0.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 ```
 
 バージョンを上げる手順:
@@ -1599,7 +1599,7 @@ printf '\033[31mRED\033[0m\n'
 
 #### 16.10.4 インストーラ
 
-1. `dist\WinConsoleServerSetup-0.1.0.exe` を実行
+1. `dist\WinConsoleServerSetup-0.2.0.exe` を実行
 2. インストール先に 4 つの exe/dll があること
 3. スタートメニューから `WinConsoleTerminal` が起動すること
 4. アンインストールでファイアウォール規則が消えること

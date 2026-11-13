@@ -1,4 +1,5 @@
 #include "remote_session.h"
+#include "../common/version.h"
 
 #include <algorithm>
 #include <chrono>
@@ -155,7 +156,7 @@ bool RemoteSession::Handshake(const TerminalStartOptions& opt, std::wstring* err
                                       (int)wcs::kMinColumns, (int)wcs::kMaxDimension);
     hello.rows = (uint16_t)std::clamp(opt.rows > 0 ? opt.rows : 24,
                                       (int)wcs::kMinRows, (int)wcs::kMaxDimension);
-    hello.name = "WinConsoleTerminal/0.1";
+    hello.name = "WinConsoleTerminal/" WCS_VERSION;
     hello.shell = config_.shell;
     hello.token = config_.token;
 
