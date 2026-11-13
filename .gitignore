@@ -1,0 +1,80 @@
+*.old
+*.log
+third_party_reference
+.antigravitycli/
+build/
+**/build/
+**/build_*/
+**/references/*
+**/references/
+
+# Prerequisites
+*.d
+*.i
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Linker files
+*.ilk
+
+# Debugger Files
+*.pdb
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# debug information files
+*.dwo
+
+.opencode
+opencode.config
+
+references
+build
+Application/SmallUV/
+src/generated/
+debug_init.log
+claude2-loop.log
+claude2-loop.ps1
+nul
+
+# Build output
+bin/
+
+# Visual Studio user files
+**/.vs/
+
+# WebView2 user data directory
+*.WebView2/
+
+dist/
+
+# Vendored runtime dependencies (needed to build/run)
+!third_party/conpty/*.dll
+!third_party/conpty/*.exe
+!third_party/libsixel/*.lib

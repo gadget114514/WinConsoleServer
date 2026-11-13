@@ -1,0 +1,39 @@
+#include <windows.h>
+#include "resource.h"
+
+IDR_MAINMENU MENU
+BEGIN
+    POPUP "&File"
+    BEGIN
+        MENUITEM "&Connect...",           IDM_CONNECT
+        MENUITEM "&Disconnect",           IDM_DISCONNECT
+        MENUITEM SEPARATOR
+        MENUITEM "E&xit",                 IDM_EXIT
+    END
+    POPUP "&Edit"
+    BEGIN
+        MENUITEM "&Copy",                 IDM_COPY
+        MENUITEM "&Paste",                IDM_PASTE
+    END
+    POPUP "&Help"
+    BEGIN
+        MENUITEM "&About",                IDM_ABOUT
+    END
+END
+
+IDD_CONNECT DIALOGEX 0, 0, 240, 132
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Connect to WinConsoleServer"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT           "Host:", -1, 10, 12, 45, 8
+    EDITTEXT        IDC_HOST, 60, 10, 165, 13, ES_AUTOHSCROLL
+    LTEXT           "Port:", -1, 10, 32, 45, 8
+    EDITTEXT        IDC_PORT, 60, 30, 60, 13, ES_AUTOHSCROLL | ES_NUMBER
+    LTEXT           "Shell:", -1, 10, 52, 45, 8
+    COMBOBOX        IDC_SHELL, 60, 50, 165, 60, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Token:", -1, 10, 72, 45, 8
+    EDITTEXT        IDC_TOKEN, 60, 70, 165, 13, ES_PASSWORD | ES_AUTOHSCROLL
+    DEFPUSHBUTTON   "Connect", IDOK, 118, 104, 50, 16
+    PUSHBUTTON      "Cancel", IDCANCEL, 175, 104, 50, 16
+END
