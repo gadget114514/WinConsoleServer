@@ -80,11 +80,11 @@ void TerminalBuffer::resize(int columns, int rows) {
     const int insertCount = rows_ - (int)screen_.size();
     while ((int)screen_.size() < rows_)
         screen_.insert(screen_.begin(), blankLine());
-    if (insertCount > 0) {
+    if (insertCount > 0 && !oldScreen.empty()) {
         cursorRow_         += insertCount;
         savedCursorRow_    += insertCount;
         savedCursorRowAlt_ += insertCount;
-    } else {
+    } else if (insertCount <= 0) {
         const int discardCount = (std::max)(0, (int)oldScreen.size() - rows_);
         cursorRow_         -= discardCount;
         savedCursorRow_    -= discardCount;
@@ -777,8 +777,7 @@ int TerminalBuffer::characterWidth(unsigned int u, bool ambiguousWide) {
     if (u == 0x2b50 || u == 0x2b55
         || u == 0x231a || u == 0x231b || u == 0x23f0 || u == 0x23f3
         || (u >= 0x23e9 && u <= 0x23ec)
-        || (u >= 0x23f8 && u <= 0x23fa)
-        || u == 0x25b6 || u == 0x25c0)
+        || (u >= 0x23f8 && u <= 0x23fa))
         return 2;
 
     // Emojis in 2600-27BF range (always wide)
@@ -809,6 +808,14 @@ int TerminalBuffer::characterWidth(unsigned int u, bool ambiguousWide) {
 
     // Ambiguous-width classification (follow Unicode EastAsianWidth=A)
     if (ambiguousWide) {
+        // Box drawing / block elements / arrows are kept narrow even in CJK
+        // code pages; otherwise ASCII-art diagrams fall apart.  The triangle
+        // arrows (▶/◀) are common in diagrams and are text-width in practice.
+        if ((u >= 0x2190 && u <= 0x21ff) ||
+            (u >= 0x2500 && u <= 0x259f) ||
+            u == 0x25b6 || u == 0x25c0)
+            return 1;
+
         if ((u >= 0x01a8 && u <= 0x01a8)
             || (u >= 0x01c4 && u <= 0x01cc)
             || (u >= 0x01f1 && u <= 0x01f3)
@@ -1095,7 +1102,24 @@ int TerminalBuffer::attributeChangeExtent() const {
     return attrChangeExtent_;
 }
 
-static void applySgrToCell(TerminalCell& cell, const std::vector<int>& sgr) {
+// xterm 256-colour palette using this buffer's overridable 16-colour palette.
+static TermColor color256FromPalette(int index, const TermColor* palette) {
+    if (index < 0)   index = 0;
+    if (index > 255) index = 255;
+    if (index < 16)  return palette[index];
+    if (index >= 232) {
+        const int v = 8 + (index - 232) * 10;
+        return TermColor::fromRgb((uint8_t)v, (uint8_t)v, (uint8_t)v);
+    }
+    const int c = index - 16;
+    auto comp = [](int v) { return v == 0 ? 0 : 55 + v * 40; };
+    return TermColor::fromRgb(
+        (uint8_t)comp(c / 36),
+        (uint8_t)comp((c / 6) % 6),
+        (uint8_t)comp(c % 6));
+}
+
+void TerminalBuffer::applySgrToCell(TerminalCell& cell, const std::vector<int>& sgr) {
     for (size_t i = 0; i < sgr.size(); ++i) {
         int v = sgr[i];
         switch (v) {
@@ -1103,34 +1127,36 @@ static void applySgrToCell(TerminalCell& cell, const std::vector<int>& sgr) {
         case 1:  cell.bold = true; break;
         case 2:  cell.dim = true; break;
         case 3:  cell.italic = true; break;
-        case 4:  cell.underline = true; break;
+        case 4:  cell.underlineStyle = 1; break;
         case 5:  cell.blink = true; break;
         case 7:  cell.inverse = true; break;
         case 9:  cell.strikethrough = true; break;
         case 21: cell.bold = false; break;
         case 22: cell.bold = false; cell.dim = false; break;
         case 23: cell.italic = false; break;
-        case 24: cell.underline = false; break;
+        case 24: cell.underlineStyle = 0; break;
         case 25: cell.blink = false; break;
         case 27: cell.inverse = false; break;
         case 29: cell.strikethrough = false; break;
         case 38: case 48: case 58: {
             TermColor c;
-            if (i + 2 < sgr.size() && sgr[i+1] == 2) {
+            bool ok = false;
+            if (i + 4 < sgr.size() && sgr[i + 1] == 2) {
                 c = TermColor::fromRgb(
-                    (uint8_t)clamp(sgr[i+2], 0, 255),
-                    (uint8_t)clamp(sgr[i+3], 0, 255),
-                    (uint8_t)clamp(sgr[i+4], 0, 255));
+                    (uint8_t)clamp(sgr[i + 2], 0, 255),
+                    (uint8_t)clamp(sgr[i + 3], 0, 255),
+                    (uint8_t)clamp(sgr[i + 4], 0, 255));
                 i += 4;
-            } else if (i + 1 < sgr.size() && sgr[i+1] == 5) {
-                int idx = (i + 2 < sgr.size()) ? sgr[i+2] : 0;
-                c = TermColor::fromRgb(0, 0, 0);
-                (void)idx;
+                ok = true;
+            } else if (i + 2 < sgr.size() && sgr[i + 1] == 5) {
+                c = color256FromPalette(sgr[i + 2], palette_);
                 i += 2;
+                ok = true;
             }
+            if (!ok) break;
             if (v == 38) { cell.foreground = c; cell.decorColor = c; }
             else if (v == 48) cell.background = c;
-            else if (v == 58) cell.decorColor = c;
+            else cell.decorColor = c;
             break;
         }
         case 39: cell.foreground = DefaultFg(); cell.decorColor = DefaultDecor(); break;
@@ -1138,10 +1164,15 @@ static void applySgrToCell(TerminalCell& cell, const std::vector<int>& sgr) {
         case 59: cell.decorColor = DefaultDecor(); break;
         default:
             if (v >= 30 && v <= 37) {
-                cell.foreground = TermColor::fromRgb(0,0,0);
+                cell.foreground = palette_[v - 30];
                 cell.decorColor = cell.foreground;
             } else if (v >= 40 && v <= 47) {
-                cell.background = TermColor::fromRgb(0,0,0);
+                cell.background = palette_[v - 40];
+            } else if (v >= 90 && v <= 97) {
+                cell.foreground = palette_[v - 82];
+                cell.decorColor = cell.foreground;
+            } else if (v >= 100 && v <= 107) {
+                cell.background = palette_[v - 92];
             }
             break;
         }
@@ -1173,7 +1204,7 @@ void TerminalBuffer::reverseRectAttr(int top, int left, int bottom, int right) {
             cell.bold          = !cell.bold;
             cell.dim           = !cell.dim;
             cell.italic        = !cell.italic;
-            cell.underline     = !cell.underline;
+            cell.underlineStyle = cell.underlineStyle ? 0 : 1;
             cell.blink         = !cell.blink;
             cell.inverse       = !cell.inverse;
             cell.strikethrough = !cell.strikethrough;

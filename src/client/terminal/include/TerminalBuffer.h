@@ -202,6 +202,7 @@ private:
     void normalizeWideCells(Line& line);
     void resizeLines(std::vector<Line>& lines, int oldColumns);
     void eraseCell(int row, int column, const TerminalCell& attrs = TerminalCell());
+    void applySgrToCell(TerminalCell& cell, const std::vector<int>& sgr);
     void clampCursor();
     void trimHistory();
 

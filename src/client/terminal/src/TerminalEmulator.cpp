@@ -111,6 +111,7 @@ void TerminalEmulator::reset(TerminalBuffer* buffer) {
     currentAttrs_     = TerminalCell();
     isBold_           = false;
     isInverseMode_    = false;
+    fgBasicIndex_     = -1;
     lineDrawingG0_    = false;
     activeHyperlinkUrl_.clear();
 
@@ -637,6 +638,7 @@ void TerminalEmulator::handleCsi(const std::wstring& raw, wchar_t fin) {
             currentAttrs_     = TerminalCell();
             isBold_           = false;
             isInverseMode_    = false;
+            fgBasicIndex_     = -1;
             lineDrawingG0_    = false;
             activeHyperlinkUrl_.clear();
         }
@@ -764,10 +766,12 @@ void TerminalEmulator::handleSgr(const std::vector<std::wstring>& parts) {
             currentAttrs_  = TerminalCell();
             isBold_        = false;
             isInverseMode_ = false;
+            fgBasicIndex_  = -1;
             break;
         case 1:  // bold
             isBold_             = true;
             currentAttrs_.bold  = true;
+            updateBoldBrightness();
             break;
         case 2:  // dim / faint
             currentAttrs_.dim   = true;
@@ -775,8 +779,17 @@ void TerminalEmulator::handleSgr(const std::vector<std::wstring>& parts) {
         case 3:  // italic (terminalpp)
             currentAttrs_.italic = true;
             break;
-        case 4:  // underline
-            currentAttrs_.underline = true;
+        case 4:  // underline (SGR 4 or 4:x)
+            if (p[i].find(L':') != std::wstring::npos) {
+                auto sub = splitParams(p[i], L':');
+                int style = 1;
+                if (sub.size() > 1) {
+                    try { style = std::stoi(sub[1]); } catch(...) { style = 1; }
+                }
+                currentAttrs_.underlineStyle = (uint8_t)std::clamp(style, 0, 5);
+            } else {
+                currentAttrs_.underlineStyle = 1;
+            }
             break;
         case 5:  // blink (terminalpp)
             currentAttrs_.blink = true;
@@ -791,18 +804,19 @@ void TerminalEmulator::handleSgr(const std::vector<std::wstring>& parts) {
         case 21: // bold off
             isBold_             = false;
             currentAttrs_.bold  = false;
+            updateBoldBrightness();
             break;
-        case 22: // normal intensity
+        case 22: // normal intensity (bold + dim only; italic is SGR 23)
             isBold_             = false;
             currentAttrs_.bold  = false;
             currentAttrs_.dim   = false;
-            currentAttrs_.italic= false;
+            updateBoldBrightness();
             break;
         case 23: // italic off (terminalpp)
             currentAttrs_.italic = false;
             break;
         case 24: // underline off
-            currentAttrs_.underline = false;
+            currentAttrs_.underlineStyle = 0;
             break;
         case 25: // blink off (terminalpp)
             currentAttrs_.blink = false;
@@ -815,26 +829,35 @@ void TerminalEmulator::handleSgr(const std::vector<std::wstring>& parts) {
             currentAttrs_.strikethrough = false;
             break;
         case 38: { // extended foreground
-            TermColor c = parseSgrExtendedColor(p, i);
-            currentAttrs_.foreground = c;
-            currentAttrs_.decorColor = c;
+            bool ok = true;
+            TermColor c = (p[i].find(L':') != std::wstring::npos)
+                        ? parseSgrColonColor(p[i], ok)
+                        : parseSgrExtendedColor(p, i);
+            if (ok && !c.isDefault) currentAttrs_.foreground = c;
+            fgBasicIndex_ = -1;
             break;
         }
-        case 39: // default foreground
+        case 39: // default foreground (does NOT reset SGR 58 decor colour)
             currentAttrs_.foreground = DefaultFg();
-            currentAttrs_.decorColor = DefaultDecor();
+            fgBasicIndex_ = -1;
             break;
         case 48: { // extended background
-            TermColor c = parseSgrExtendedColor(p, i);
-            currentAttrs_.background = c;
+            bool ok = true;
+            TermColor c = (p[i].find(L':') != std::wstring::npos)
+                        ? parseSgrColonColor(p[i], ok)
+                        : parseSgrExtendedColor(p, i);
+            if (ok && !c.isDefault) currentAttrs_.background = c;
             break;
         }
         case 49: // default background
             currentAttrs_.background = DefaultBg();
             break;
         case 58: { // underline/decoration colour (terminalpp / kitty)
-            TermColor c = parseSgrExtendedColor(p, i);
-            currentAttrs_.decorColor = c;
+            bool ok = true;
+            TermColor c = (p[i].find(L':') != std::wstring::npos)
+                        ? parseSgrColonColor(p[i], ok)
+                        : parseSgrExtendedColor(p, i);
+            if (ok && !c.isDefault) currentAttrs_.decorColor = c;
             break;
         }
         case 59: // reset decoration colour
@@ -842,13 +865,14 @@ void TerminalEmulator::handleSgr(const std::vector<std::wstring>& parts) {
             break;
         default:
             if (v >= 30 && v <= 37) {
-                int idx = v - 30;
-                if (boldIsBright_ && isBold_) idx += 8;
+                fgBasicIndex_ = v - 30;
+                int idx = fgBasicIndex_ + ((boldIsBright_ && isBold_) ? 8 : 0);
                 currentAttrs_.foreground = ansiColor(idx, buffer_);
                 currentAttrs_.decorColor = currentAttrs_.foreground;
             } else if (v >= 40 && v <= 47) {
                 currentAttrs_.background = ansiColor(v - 40, buffer_);
             } else if (v >= 90 && v <= 97) {
+                fgBasicIndex_ = -1;
                 currentAttrs_.foreground = ansiColor(v - 82, buffer_); // 90-97 → 8-15
                 currentAttrs_.decorColor = currentAttrs_.foreground;
             } else if (v >= 100 && v <= 107) {
@@ -857,6 +881,17 @@ void TerminalEmulator::handleSgr(const std::vector<std::wstring>& parts) {
             break;
         }
     }
+}
+
+// Re-evaluate SGR 30-37 foreground when bold changes (bold-is-bright),
+// so "31;1" and "1;31" produce the same colour.
+void TerminalEmulator::updateBoldBrightness() {
+    if (fgBasicIndex_ < 0) return;
+    const TermColor oldFg = currentAttrs_.foreground;
+    const int idx = fgBasicIndex_ + ((boldIsBright_ && isBold_) ? 8 : 0);
+    currentAttrs_.foreground = ansiColor(idx, buffer_);
+    if (currentAttrs_.decorColor == oldFg)
+        currentAttrs_.decorColor = currentAttrs_.foreground;
 }
 
 // Extended colour parsing (38;5;n or 38;2;r;g;b)
@@ -873,13 +908,54 @@ TermColor TerminalEmulator::parseSgrExtendedColor(const std::vector<std::wstring
         return color256(idx, buffer_);
     }
     if (mode == 2) { // truecolor
-        if (i + 3 >= parts.size()) { i += 3; return DefaultFg(); }
+        // ISO 8613-6 allows an (empty) colour-space id: 38;2;;r;g;b.
+        // It is unambiguous when that form has exactly 5 params from the mode
+        // (mode, empty, r, g, b) or when another SGR code follows.
+        size_t rIdx = i + 1;
+        if (i + 1 < parts.size() && parts[i + 1].empty() &&
+            ((parts.size() - i) == 5 || i + 4 < parts.size()))
+            rIdx = i + 2;
+        if (rIdx + 2 >= parts.size()) { i += 3; return DefaultFg(); }
         int r = 0, g = 0, b = 0;
-        try { r = std::stoi(parts[i+1]); } catch(...) {}
-        try { g = std::stoi(parts[i+2]); } catch(...) {}
-        try { b = std::stoi(parts[i+3]); } catch(...) {}
-        i += 3;
-        return TermColor::fromRgb((uint8_t)r, (uint8_t)g, (uint8_t)b);
+        try { r = std::stoi(parts[rIdx]);     } catch(...) {}
+        try { g = std::stoi(parts[rIdx + 1]); } catch(...) {}
+        try { b = std::stoi(parts[rIdx + 2]); } catch(...) {}
+        i = rIdx + 2;
+        return TermColor::fromRgb((uint8_t)std::clamp(r, 0, 255),
+                                  (uint8_t)std::clamp(g, 0, 255),
+                                  (uint8_t)std::clamp(b, 0, 255));
+    }
+    return DefaultFg();
+}
+
+// Colon-separated SGR colour form, e.g. "38:2::255:0:0" / "38:5:196".
+TermColor TerminalEmulator::parseSgrColonColor(const std::wstring& token, bool& ok) {
+    ok = false;
+    auto sub = splitParams(token, L':');
+    if (sub.size() < 2) return DefaultFg();
+
+    int mode = 0;
+    try { mode = std::stoi(sub[1]); } catch(...) { return DefaultFg(); }
+
+    if (mode == 5) {
+        if (sub.size() < 3) return DefaultFg();
+        int idx = 0;
+        try { idx = std::stoi(sub[2]); } catch(...) {}
+        ok = true;
+        return color256(idx, buffer_);
+    }
+    if (mode == 2) {
+        // [code, 2, (colour-space), r, g, b]
+        const size_t base = (sub.size() >= 6) ? 3 : 2;
+        if (sub.size() < base + 3) return DefaultFg();
+        int r = 0, g = 0, b = 0;
+        try { r = std::stoi(sub[base]);     } catch(...) {}
+        try { g = std::stoi(sub[base + 1]); } catch(...) {}
+        try { b = std::stoi(sub[base + 2]); } catch(...) {}
+        ok = true;
+        return TermColor::fromRgb((uint8_t)std::clamp(r, 0, 255),
+                                  (uint8_t)std::clamp(g, 0, 255),
+                                  (uint8_t)std::clamp(b, 0, 255));
     }
     return DefaultFg();
 }
@@ -916,11 +992,12 @@ static bool parseRgbColor(const std::wstring& s, uint8_t& r, uint8_t& g, uint8_t
 // ---------------------------------------------------------------------------
 void TerminalEmulator::handleOsc(const std::wstring& text) {
     const size_t sep = text.find(L';');
-    if (sep == std::wstring::npos) return;
 
     int num = 0;
-    try { num = std::stoi(text.substr(0, sep)); } catch(...) { return; }
-    std::wstring arg1 = text.substr(sep + 1);
+    try {
+        num = std::stoi(sep == std::wstring::npos ? text : text.substr(0, sep));
+    } catch(...) { return; }
+    std::wstring arg1 = (sep == std::wstring::npos) ? L"" : text.substr(sep + 1);
 
     switch (num) {
     case 0:
@@ -983,18 +1060,32 @@ void TerminalEmulator::handleOsc(const std::wstring& text) {
         break;
     }
 
-    case 4: { // set colour palette: OSC 4 ; index ; #RRGGBB
-        const size_t sep2 = arg1.find(L';');
-        if (sep2 != std::wstring::npos) {
-            int idx = 0;
-            try { idx = std::stoi(arg1.substr(0, sep2)); } catch(...) { idx = -1; }
-            if (idx >= 0 && idx < 16) {
-                std::wstring val = arg1.substr(sep2 + 1);
-                if (val == L"?") { markUnsupported(); break; }
+    case 4: { // set colour palette: OSC 4 ; index ; #RRGGBB [; index ; #RRGGBB ...]
+        size_t pos = 0;
+        while (pos <= arg1.size()) {
+            const size_t sep2 = arg1.find(L';', pos);
+            const std::wstring idxStr = arg1.substr(
+                pos, sep2 == std::wstring::npos ? std::wstring::npos : sep2 - pos);
+            if (idxStr == L"?") { markUnsupported(); break; }
+
+            int idx = -1;
+            try { idx = std::stoi(idxStr); } catch(...) { idx = -1; }
+
+            if (sep2 == std::wstring::npos) break;
+            const size_t sep3 = arg1.find(L';', sep2 + 1);
+            const std::wstring val = arg1.substr(
+                sep2 + 1, sep3 == std::wstring::npos ? std::wstring::npos : sep3 - sep2 - 1);
+
+            if (val == L"?") {
+                markUnsupported();
+            } else if (idx >= 0 && idx < 16) {
                 uint8_t r, g, b;
                 if (parseRgbColor(val, r, g, b))
                     buffer_->setPaletteColor(idx, TermColor::fromRgb(r, g, b));
             }
+
+            if (sep3 == std::wstring::npos) break;
+            pos = sep3 + 1;
         }
         break;
     }
@@ -1021,6 +1112,30 @@ void TerminalEmulator::handleOsc(const std::wstring& text) {
             buffer_->setCursorColor(TermColor::fromRgb(r, g, b));
         break;
     }
+
+    case 104: { // reset palette: OSC 104 [; index ...]
+        if (arg1.empty()) {
+            for (int i = 0; i < 16; ++i)
+                buffer_->setPaletteColor(i, kAnsiPalette[i]);
+            break;
+        }
+        auto ids = splitParams(arg1);
+        for (const auto& s : ids) {
+            int idx = -1;
+            try { idx = std::stoi(s); } catch(...) { idx = -1; }
+            if (idx >= 0 && idx < 16)
+                buffer_->setPaletteColor(idx, kAnsiPalette[idx]);
+        }
+        break;
+    }
+
+    case 110: // reset default foreground
+        buffer_->setDefaultFgColor(DefaultFg());
+        break;
+
+    case 111: // reset default background
+        buffer_->setDefaultBgColor(DefaultBg());
+        break;
 
     case 112: // reset cursor colour
         buffer_->resetCursorColor();
@@ -1298,6 +1413,7 @@ void TerminalEmulator::saveCursorFull() {
     savedDecIsBold_         = isBold_;
     savedDecBoldIsBright_   = boldIsBright_;
     savedDecIsInverseMode_  = isInverseMode_;
+    savedDecFgBasicIndex_   = fgBasicIndex_;
 }
 
 void TerminalEmulator::restoreCursorFull() {
@@ -1307,6 +1423,7 @@ void TerminalEmulator::restoreCursorFull() {
     isBold_          = savedDecIsBold_;
     boldIsBright_    = savedDecBoldIsBright_;
     isInverseMode_   = savedDecIsInverseMode_;
+    fgBasicIndex_    = savedDecFgBasicIndex_;
 }
 
 // ---------------------------------------------------------------------------

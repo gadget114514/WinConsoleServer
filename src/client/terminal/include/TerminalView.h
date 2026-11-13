@@ -22,6 +22,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -114,6 +115,8 @@ private:
     // Rendering
     bool EnsureRenderTarget();
     void ReleaseRenderTarget();
+    void ReleaseBrushes();
+    void InitTextFormats();
     void UpdateMetrics();
     void DrawCell(ID2D1RenderTarget* rt, int row, int col,
                   const TerminalCell& cell, bool isCursor, bool cursorVisible,
@@ -175,10 +178,13 @@ private:
     ID2D1Factory*          d2dFactory_  = nullptr;
     ID2D1HwndRenderTarget* renderTarget_= nullptr;
     IDWriteFactory*        dwFactory_   = nullptr;
-    IDWriteTextFormat*     textFormat_  = nullptr;
+    IDWriteTextFormat*     textFormat_  = nullptr;  // regular
+    IDWriteTextFormat*     textFormatBold_       = nullptr;
+    IDWriteTextFormat*     textFormatItalic_     = nullptr;
+    IDWriteTextFormat*     textFormatBoldItalic_ = nullptr;
 
-    // cached brush (one at a time — recreated per-draw-call)
-    ID2D1SolidColorBrush*  brush_       = nullptr;
+    // colour + alpha → brush cache (brushes live until the render target is recreated)
+    std::unordered_map<uint32_t, ID2D1SolidColorBrush*> brushCache_;
 
     // Cell metrics
     float cellWidth_  = 8.0f;
@@ -188,6 +194,10 @@ private:
     // Cursor blink
     bool   cursorBlink_   = true;   // current visible state (true = visible; starts visible so cursor shows at startup)
     UINT_PTR cursorTimer_ = 0;
+
+    // SGR 5 text blink
+    bool   textBlinkOn_   = true;   // current visible phase
+    bool   hasBlinkCells_ = false;  // set during paint; controls full-window invalidation
 
     // Output queue: I/O thread pushes, UI thread drains (WM_TERMINAL_OUTPUT_WAKE).
     std::mutex outputMutex_;

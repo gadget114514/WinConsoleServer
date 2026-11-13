@@ -1,6 +1,7 @@
 #include "../include/TerminalView.h"
 #include "../../local_session.h"
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <shellapi.h>   // ShellExecuteW for hyperlink open
 #include <windowsx.h>  // GET_X_LPARAM / GET_Y_LPARAM
@@ -442,6 +443,7 @@ LRESULT TerminalView::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (buffer_.focusEventReportingEnabled())
             if (io_) io_->Write("\x1b[I", 3);
         cursorBlink_ = true;   // フォーカス取得時にカーソルを即座に表示する
+        textBlinkOn_ = true;   // フォーカス取得時は点滅テキストを表示位相に戻す
         StartCursorTimer();
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
@@ -508,6 +510,11 @@ LRESULT TerminalView::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             } else {
                 cursorBlink_ = true;
             }
+
+            // SGR 5: toggle the text blink phase.
+            textBlinkOn_ = !textBlinkOn_;
+            if (hasBlinkCells_)
+                InvalidateRect(hwnd, nullptr, FALSE);
         }
         return 0;
     }
@@ -530,28 +537,7 @@ LRESULT TerminalView::OnCreate(HWND hwnd) {
                         __uuidof(IDWriteFactory),
                         reinterpret_cast<IUnknown**>(&dwFactory_));
 
-    // Text format — prefer Cascadia Mono, fall back to Consolas
-    if (dwFactory_) {
-        HRESULT hr = dwFactory_->CreateTextFormat(
-            L"Cascadia Mono", nullptr,
-            DWRITE_FONT_WEIGHT_REGULAR, DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_STRETCH_NORMAL,
-            11.0f * 96.0f / 72.0f,   // pt → dip
-            L"", &textFormat_);
-        if (FAILED(hr)) {
-            dwFactory_->CreateTextFormat(
-                L"Consolas", nullptr,
-                DWRITE_FONT_WEIGHT_REGULAR, DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL,
-                11.0f * 96.0f / 72.0f,
-                L"", &textFormat_);
-        }
-        if (textFormat_) {
-            textFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-            textFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
-            textFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-        }
-    }
+    InitTextFormats();
 
     // ---------------------------------------------------------------------------
     // %APPDATA%\Ecode\settings.ini の [Terminal] セクションから設定を読む
@@ -606,8 +592,10 @@ LRESULT TerminalView::OnCreate(HWND hwnd) {
 void TerminalView::OnDestroy() {
     StopCursorTimer();
     if (tooltip_) { DestroyWindow(tooltip_); tooltip_ = nullptr; }
-    if (textFormat_) { textFormat_->Release(); textFormat_ = nullptr; }
-    if (brush_)      { brush_->Release();      brush_      = nullptr; }
+    if (textFormat_)           { textFormat_->Release();           textFormat_           = nullptr; }
+    if (textFormatBold_)       { textFormatBold_->Release();       textFormatBold_       = nullptr; }
+    if (textFormatItalic_)     { textFormatItalic_->Release();     textFormatItalic_     = nullptr; }
+    if (textFormatBoldItalic_) { textFormatBoldItalic_->Release(); textFormatBoldItalic_ = nullptr; }
     ReleaseRenderTarget();
 }
 
@@ -814,26 +802,90 @@ bool TerminalView::EnsureRenderTarget() {
         D2D1::RenderTargetProperties(),
         D2D1::HwndRenderTargetProperties(hwnd_, size),
         &renderTarget_);
+    if (SUCCEEDED(hr) && renderTarget_) {
+        // Cell backgrounds sit on fractional pixel boundaries; antialiasing
+        // them produces visible seams between adjacent filled cells.
+        renderTarget_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+    }
     return SUCCEEDED(hr);
 }
 
 void TerminalView::ReleaseRenderTarget() {
-    if (brush_)        { brush_->Release();        brush_       = nullptr; }
+    ReleaseBrushes();
     if (renderTarget_) { renderTarget_->Release(); renderTarget_= nullptr; }
 }
 
 // ---------------------------------------------------------------------------
-// Brush helper
+// Brush cache
 // ---------------------------------------------------------------------------
+void TerminalView::ReleaseBrushes() {
+    for (auto& kv : brushCache_) {
+        if (kv.second) kv.second->Release();
+    }
+    brushCache_.clear();
+}
+
 D2D1_COLOR_F TerminalView::ToD2DColor(const TermColor& c, float alpha) {
     return D2D1::ColorF(c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, alpha);
 }
 
 ID2D1SolidColorBrush* TerminalView::GetBrush(const TermColor& c, float alpha) {
-    if (brush_) { brush_->Release(); brush_ = nullptr; }
-    if (renderTarget_)
-        renderTarget_->CreateSolidColorBrush(ToD2DColor(c, alpha), &brush_);
-    return brush_;
+    if (!renderTarget_) return nullptr;
+
+    int a = (int)(alpha * 255.0f + 0.5f);
+    a = std::max(0, std::min(255, a));
+    const uint32_t key = ((uint32_t)a << 24) |
+                         ((uint32_t)c.r << 16) |
+                         ((uint32_t)c.g << 8)  |
+                          (uint32_t)c.b;
+
+    auto it = brushCache_.find(key);
+    if (it != brushCache_.end()) return it->second;
+
+    ID2D1SolidColorBrush* brush = nullptr;
+    if (FAILED(renderTarget_->CreateSolidColorBrush(ToD2DColor(c, alpha), &brush)))
+        return nullptr;
+    brushCache_[key] = brush;
+    return brush;
+}
+
+// ---------------------------------------------------------------------------
+// Text formats (regular / bold / italic / bold+italic)
+// ---------------------------------------------------------------------------
+void TerminalView::InitTextFormats() {
+    if (!dwFactory_) return;
+
+    struct Spec {
+        IDWriteTextFormat** out;
+        DWRITE_FONT_WEIGHT  weight;
+        DWRITE_FONT_STYLE   style;
+    };
+    Spec specs[] = {
+        { &textFormat_,           DWRITE_FONT_WEIGHT_REGULAR, DWRITE_FONT_STYLE_NORMAL },
+        { &textFormatBold_,       DWRITE_FONT_WEIGHT_BOLD,    DWRITE_FONT_STYLE_NORMAL },
+        { &textFormatItalic_,     DWRITE_FONT_WEIGHT_REGULAR, DWRITE_FONT_STYLE_ITALIC },
+        { &textFormatBoldItalic_, DWRITE_FONT_WEIGHT_BOLD,    DWRITE_FONT_STYLE_ITALIC },
+    };
+
+    const float size = 11.0f * 96.0f / 72.0f;   // pt → dip
+    for (auto& spec : specs) {
+        if (*spec.out) { (*spec.out)->Release(); *spec.out = nullptr; }
+
+        HRESULT hr = dwFactory_->CreateTextFormat(
+            L"Cascadia Mono", nullptr, spec.weight, spec.style,
+            DWRITE_FONT_STRETCH_NORMAL, size, L"", spec.out);
+        if (FAILED(hr) || !*spec.out) {
+            if (*spec.out) { (*spec.out)->Release(); *spec.out = nullptr; }
+            dwFactory_->CreateTextFormat(
+                L"Consolas", nullptr, spec.weight, spec.style,
+                DWRITE_FONT_STRETCH_NORMAL, size, L"", spec.out);
+        }
+        if (*spec.out) {
+            (*spec.out)->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            (*spec.out)->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+            (*spec.out)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1005,7 +1057,9 @@ void TerminalView::OnPaint() {
     rt->BeginDraw();
 
     // Background
-    rt->Clear(ToD2DColor(buffer_.defaultBgColor()));
+    rt->Clear(ToD2DColor(buffer_.reverseVideo()
+                             ? buffer_.defaultFgColor()
+                             : buffer_.defaultBgColor()));
 
     if (!textFormat_) { rt->EndDraw(); EndPaint(hwnd_, &ps); return; }
 
@@ -1014,6 +1068,8 @@ void TerminalView::OnPaint() {
     const int totalLog = buffer_.totalLineCount();
     const int histLines= buffer_.historyLineCount();
     maxScrollOffset_ = histLines;
+
+    hasBlinkCells_ = false;
 
     // Determine first logical row to display
     // scrollOffset_ == 0 means bottom (newest)
@@ -1061,6 +1117,7 @@ void TerminalView::OnPaint() {
                              && buffer_.cursorVisible());
             bool isSelected = IsSelected(logRow, col) || (cell.wide && IsSelected(logRow, col + 1));
             bool showCursor = cursorBlink_ || !buffer_.cursorBlink();
+            if (cell.blink) hasBlinkCells_ = true;
             DrawCell(rt, screenRow, col, cell, isCursor, showCursor, isSelected);
         }
     }
@@ -1142,6 +1199,53 @@ void TerminalView::OnPaint() {
     EndPaint(hwnd_, &ps);
 }
 
+static int ColorLuma(const TermColor& c) {
+    return (299 * c.r + 587 * c.g + 114 * c.b) / 1000;
+}
+
+// Keep text legible when fg and bg are almost the same (e.g. ANSI black on the
+// default near-black background).  Only extreme low contrast is touched so
+// deliberate dim/low-contrast colours are preserved.
+static TermColor EnsureTextContrast(const TermColor& fg, const TermColor& bg) {
+    const int lf = ColorLuma(fg);
+    const int lb = ColorLuma(bg);
+    int diff = lf - lb;
+    if (diff < 0) diff = -diff;
+    if (diff >= 16) return fg;
+
+    if (lb < 128) {
+        const int target = std::min(255, lb + 80);
+        if (lf >= target) return fg;
+        const float k = (255.0f - (float)lf) > 0.0f
+                      ? (float)(target - lf) / (255.0f - (float)lf) : 0.0f;
+        auto mix = [k](uint8_t v) -> uint8_t {
+            return (uint8_t)std::clamp((int)((float)v + (255.0f - (float)v) * k), 0, 255);
+        };
+        return TermColor::fromRgb(mix(fg.r), mix(fg.g), mix(fg.b));
+    }
+
+    const int target = std::max(0, lb - 80);
+    if (lf <= target) return fg;
+    const float k = (float)(lf - target) / (float)lf;
+    auto mix = [k](uint8_t v) -> uint8_t {
+        return (uint8_t)std::clamp((int)((float)v * (1.0f - k)), 0, 255);
+    };
+    return TermColor::fromRgb(mix(fg.r), mix(fg.g), mix(fg.b));
+}
+
+static TermColor BlendColor(const TermColor& a, const TermColor& b, float t) {
+    auto mix = [t](uint8_t x, uint8_t y) -> uint8_t {
+        const float v = (float)x + ((float)y - (float)x) * t;
+        return (uint8_t)(v < 0.0f ? 0.0f : (v > 255.0f ? 255.0f : v));
+    };
+    TermColor r;
+    r.r = mix(a.r, b.r);
+    r.g = mix(a.g, b.g);
+    r.b = mix(a.b, b.b);
+    r.isDefault = false;
+    return r;
+}
+
 void TerminalView::DrawCell(ID2D1RenderTarget* rt, int row, int col,
                             const TerminalCell& cell, bool isCursor, bool cursorVisible,
                             bool isSelected) {
@@ -1180,18 +1284,36 @@ void TerminalView::DrawCell(ID2D1RenderTarget* rt, int row, int col,
 
     TermColor fg = cell.foreground.isDefault ? buffer_.defaultFgColor() : cell.foreground;
     TermColor bg = cell.background.isDefault ? buffer_.defaultBgColor() : cell.background;
-    TermColor dc = cell.decorColor.isDefault ? fg : cell.decorColor;
 
     // Apply inverse (reverse video) at render time — swap fg/bg.
+    // DECSCNM (?5) inverts the whole screen, so it participates as an XOR.
     // defaultFgColor()/defaultBgColor() both return TermColor with isDefault=true, so after
     // the swap the new bg still has isDefault=true and the background fill below
     // would be skipped (the "skip default bg" optimisation).  Clear the flag so
     // the swapped colour is always rendered.
-    if (cell.inverse) {
+    if (cell.inverse != buffer_.reverseVideo()) {
         std::swap(fg, bg);
         bg.isDefault = false;
         fg.isDefault = false;
     }
+
+    // Avoid invisible text (ANSI black on the default near-black background).
+    fg = EnsureTextContrast(fg, bg);
+
+    // SGR 2 (dim): blend the text colour toward the background.
+    if (cell.dim) {
+        fg = BlendColor(fg, bg, 0.5f);
+        fg.isDefault = false;
+    }
+
+    // Decoration colour follows the (possibly inverted/dimmed) foreground unless
+    // an explicit SGR 58 colour was set.
+    TermColor dc = cell.decorColor.isDefault
+                 ? fg
+                 : EnsureTextContrast(cell.decorColor, bg);
+
+    // SGR 5 blink: hide the glyph and decorations during the off phase.
+    const bool blinkHidden = cell.blink && !textBlinkOn_;
 
     // Cell background at original column position
     if (!bg.isDefault) {
@@ -1239,28 +1361,64 @@ void TerminalView::DrawCell(ID2D1RenderTarget* rt, int row, int col,
     if (hasHyperlink && cell.foreground.isDefault)
         fg = TermColor::fromRgb(50, 140, 230);
 
+    // Select the text format for bold / italic (SGR 1 / 3).
+    IDWriteTextFormat* fmt = textFormat_;
+    if (cell.bold && cell.italic)      fmt = textFormatBoldItalic_;
+    else if (cell.bold)                fmt = textFormatBold_;
+    else if (cell.italic)              fmt = textFormatItalic_;
+    if (!fmt) fmt = textFormat_;
+
     // Draw text at shifted position
-    if (!cell.text.empty() && cell.text != L" ") {
+    if (!blinkHidden && !cell.text.empty() && cell.text != L" ") {
         TermColor drawFg = drawBlock ? bg : fg;
         if (auto* b = GetBrush(drawFg)) {
             D2D1_RECT_F rect = D2D1::RectF(textX, y, textX + w, y + h);
             rt->DrawText(cell.text.c_str(), (UINT32)cell.text.size(),
-                         textFormat_, rect, b,
+                         fmt, rect, b,
                          D2D1_DRAW_TEXT_OPTIONS_NONE,
                          DWRITE_MEASURING_MODE_NATURAL);
         }
     }
 
-    // Underline at text position
-    if (cell.underline) {
+    // Underline (SGR 4:x: single / double / curly / dotted / dashed)
+    if (!blinkHidden && cell.underlineStyle != 0) {
         if (auto* b = GetBrush(dc)) {
-            float uy = y + baseline_ + 1.5f;
-            rt->DrawLine({textX, uy}, {textX + w, uy}, b, 1.0f);
+            const float uy = y + baseline_ + 1.5f;
+            switch (cell.underlineStyle) {
+            case 2: // double
+                rt->DrawLine({textX, uy},         {textX + w, uy},         b, 1.0f);
+                rt->DrawLine({textX, uy + 2.0f},  {textX + w, uy + 2.0f},  b, 1.0f);
+                break;
+            case 3: { // curly
+                const float amp = 1.5f, step = 2.0f;
+                for (float wx = 0; wx < w; wx += step) {
+                    const float x0 = textX + wx;
+                    const float x1 = textX + (std::min)(wx + step, w);
+                    const float y0 = uy + amp * sinf(wx / 4.0f * 3.14159f);
+                    const float y1 = uy + amp * sinf((wx + step) / 4.0f * 3.14159f);
+                    rt->DrawLine({x0, y0}, {x1, y1}, b, 1.0f);
+                }
+                break;
+            }
+            case 4: // dotted
+                for (float wx = 0; wx < w; wx += 4.0f)
+                    rt->DrawLine({textX + wx, uy},
+                                 {textX + (std::min)(wx + 1.5f, w), uy}, b, 1.0f);
+                break;
+            case 5: // dashed
+                for (float wx = 0; wx < w; wx += 6.0f)
+                    rt->DrawLine({textX + wx, uy},
+                                 {textX + (std::min)(wx + 3.0f, w), uy}, b, 1.0f);
+                break;
+            default: // single
+                rt->DrawLine({textX, uy}, {textX + w, uy}, b, 1.0f);
+                break;
+            }
         }
     }
 
     // Strikethrough at text position
-    if (cell.strikethrough) {
+    if (!blinkHidden && cell.strikethrough) {
         if (auto* b = GetBrush(dc)) {
             float sy = y + baseline_ * 0.5f;
             rt->DrawLine({textX, sy}, {textX + w, sy}, b, 1.0f);
@@ -1268,7 +1426,7 @@ void TerminalView::DrawCell(ID2D1RenderTarget* rt, int row, int col,
     }
 
     // Hyperlink underline (OSC 8) at text position
-    if (hasHyperlink) {
+    if (!blinkHidden && hasHyperlink) {
         TermColor hc = TermColor::fromRgb(50, 140, 230);
         if (auto* b = GetBrush(hc)) {
             float uy = y + baseline_ + 1.5f;

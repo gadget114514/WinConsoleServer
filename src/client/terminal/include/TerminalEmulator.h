@@ -110,6 +110,8 @@ private:
     void handlePrivateModeSaveRestore(const std::wstring& params, bool save);
     void handleSgr(const std::vector<std::wstring>& parts);
     TermColor parseSgrExtendedColor(const std::vector<std::wstring>& parts, size_t& i);
+    TermColor parseSgrColonColor(const std::wstring& token, bool& ok);
+    void updateBoldBrightness();
     void handleCursorStyle(int value);
     void saveCursorFull();       // DECSC (ESC 7) — saves attributes too
     void restoreCursorFull();    // DECRC (ESC 8) — restores attributes too
@@ -154,6 +156,7 @@ private:
     bool boldIsBright_     = true;
     bool isBold_           = false;     // tracks bold separately for boldIsBright
     bool isInverseMode_    = false;     // tracks inverse separately to swap correctly
+    int  fgBasicIndex_     = -1;        // 0-7 while fg was set by SGR 30-37, else -1
 
     // line drawing charset G0
     bool lineDrawingG0_ = false;
@@ -164,6 +167,7 @@ private:
     bool savedDecIsBold_ = false;
     bool savedDecBoldIsBright_ = true;
     bool savedDecIsInverseMode_ = false;
+    int  savedDecFgBasicIndex_ = -1;
 
     // active hyperlink URL (OSC 8)
     std::wstring activeHyperlinkUrl_;

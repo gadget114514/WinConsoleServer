@@ -1408,6 +1408,51 @@ Closed
 6. `ecode_terminal` 静的ライブラリとしてビルドする。
 7. 改造箇所には `// WCS:` コメントを付ける（Ecode へ還元するため）。
 
+#### 16.7.1 Ecode 側の更新を取り込む手順
+
+Ecode の `Application/Terminal` が更新されたら、以下の順で取り込む。
+
+1. 変更されたファイルを確認する。
+
+```powershell
+cd D:\wsgit\Ecode
+git status --short -- Application/Terminal
+git diff HEAD -- Application/Terminal
+```
+
+2. 次のファイルは**そのままコピー**する（WCS 側で改造していない）。
+   - `include/TerminalCell.h`
+   - `include/TerminalBuffer.h`, `src/TerminalBuffer.cpp`
+   - `include/TerminalEmulator.h`, `src/TerminalEmulator.cpp`
+   - `include/ImageManager.h`, `src/ImageManager.cpp`
+   - `src/ImageManager.cpp` はコピー後に `#include <sixel.h>` へ変更する。
+
+3. `TerminalView.h/.cpp` は**そのままコピーした後に WCS 改造を再適用**する。
+   再適用する差分は次のとおり。
+   - `ConPtySession.h` → `../../iterminal_io.h`
+   - `session_` メンバ → `std::unique_ptr<ITerminalIo> io_`
+   - `SetIo` / `StartSession(TerminalStartOptions)` / `FeedOutput` / `Columns` / `Rows`
+   - 出力を `EnqueueOutput` → `WM_TERMINAL_OUTPUT_WAKE` → `DrainOutputQueue` に変更
+   - `session_.Write` / `WriteFront` / `Resize` / `Close` を `io_->...` に置換
+   - `WM_TERMINAL_OUTPUT_WAKE` の case を追加
+   - 応答コールバックの `std::wstring` を UTF-8 に変換して `io_->WriteFront`
+
+4. ビルドとテスト。
+
+```powershell
+.\scripts\build.bat
+.\bin\Release\tests\test_protocol.exe
+.\bin\Release\tests\test_frame_reader.exe
+```
+
+5. サーバ + クライアントで疎通確認（16.10）。
+
+注意:
+
+- Ecode 側の変更を `diff --strip-trailing-cr` で確認すると、WCS の差分だけを抽出できる。
+- Ecode の VT パーサ (`TerminalEmulator.cpp`) とバッファ (`TerminalBuffer.cpp`) は改造しない。
+- Ecode 側で `TerminalView` の描画・選択・点滅が変わった場合も、上記の I/O 置換だけを再適用する。
+
 ### 16.8 ビルド環境の構築
 
 #### 16.8.1 必要なもの

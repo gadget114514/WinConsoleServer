@@ -45,7 +45,8 @@ struct TerminalCell {
     bool bold           = false;
     bool dim            = false;   // SGR 2
     bool italic         = false;   // SGR 3  (terminalpp)
-    bool underline      = false;   // SGR 4
+    // SGR 4:x — 0=none, 1=single, 2=double, 3=curly, 4=dotted, 5=dashed
+    uint8_t underlineStyle = 0;
     bool blink          = false;   // SGR 5  (terminalpp)
     bool inverse        = false;   // SGR 7
     bool strikethrough  = false;   // SGR 9  (terminalpp)
