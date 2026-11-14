@@ -2,7 +2,7 @@
 ; Inno Setup 6
 
 #define MyAppName "WinConsoleServer"
-#define MyAppVersion "0.2.0"
+#define MyAppVersion "0.4.0"
 #define MyAppPublisher "WinConsoleServer Project"
 #define MyAppURL "https://example.invalid/WinConsoleServer"
 #define MyAppExeName "WinConsoleTerminal.exe"
@@ -38,14 +38,21 @@ Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 Name: "firewall"; Description: "Add Windows Firewall rule for TCP 7000 (server)"; GroupDescription: "Network:"; Flags: checkedonce
+Name: "service"; Description: "Install WinConsoleServer as a Windows service (auto-start, default TCP 7000)"; GroupDescription: "Service:"; Flags: unchecked
 
 [Files]
 Source: "..\bin\Release\WinConsoleServer.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\bin\Release\WinConsoleTerminal.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\bin\Release\wct.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\bin\Release\wcs-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\third_party\conpty\conpty.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\third_party\conpty\OpenConsole.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\doc\design.md"; DestDir: "{app}\doc"; Flags: ignoreversion
+Source: "..\doc\wcsp.md"; DestDir: "{app}\doc"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+
+[Dirs]
+Name: "{commonappdata}\WinConsoleServer"
 
 [Icons]
 Name: "{group}\WinConsoleTerminal"; Filename: "{app}\{#MyAppExeName}"
@@ -57,9 +64,11 @@ Name: "{autodesktop}\WinConsoleTerminal"; Filename: "{app}\{#MyAppExeName}"; Tas
 
 [Run]
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""WinConsoleServer TCP 7000"" dir=in action=allow protocol=TCP localport=7000"; Flags: runhidden; Tasks: firewall
+Filename: "{app}\WinConsoleServer.exe"; Parameters: "--install-service --listen 0.0.0.0:7000 --shell cmd --history-bytes 33554432"; Flags: runhidden; Tasks: service
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
+Filename: "{app}\WinConsoleServer.exe"; Parameters: "--uninstall-service"; Flags: runhidden; RunOnceId: "RemoveService"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""WinConsoleServer TCP 7000"""; Flags: runhidden; RunOnceId: "RemoveFirewallRule"
 
 [Code]

@@ -162,14 +162,25 @@ bool TerminalView::StartSession(const TerminalStartOptions& opt, std::wstring* e
     if (hwnd_) {
         RECT rc; GetClientRect(hwnd_, &rc);
         if (rc.right - rc.left > 120 && rc.bottom - rc.top > 100) {
-            if (cellWidth_  > 0) effective.cols = std::max(10, (int)((rc.right  - rc.left) / cellWidth_));
-            if (cellHeight_ > 0) effective.rows = std::max(3,  (int)((rc.bottom - rc.top)  / cellHeight_));
+            int cols = 0;
+            int rows = 0;
+            if (GridSizeFor(rc.right - rc.left, rc.bottom - rc.top, cols, rows)) {
+                effective.cols = cols;
+                effective.rows = rows;
+            }
         }
     }
     buffer_.resize(effective.cols, effective.rows);
 
     io_->SetOutputSink([this](const char* data, size_t len) {
         EnqueueOutput(data, len);
+    });
+
+    // The receiver thread must never touch the buffer; hand the applied size
+    // to the UI thread.
+    io_->SetResizedHandler([this](const wcs::ResizedInfo& info) {
+        auto* copy = new wcs::ResizedInfo(info);
+        PostMessageW(hwnd_, WM_TERMINAL_RESIZED, 0, (LPARAM)copy);
     });
 
     return io_->Start(effective, error);
@@ -268,6 +279,14 @@ LRESULT TerminalView::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_ERASEBKGND:   return 1; // handled in OnPaint
     case WM_KEYDOWN:      OnKeyDown(wp, lp); return 0;
     case WM_CHAR:         OnChar((wchar_t)wp); return 0;
+    case WM_TERMINAL_RESIZED: {
+        auto* info = (wcs::ResizedInfo*)lp;
+        if (info) {
+            OnRemoteResized(*info);
+            delete info;
+        }
+        return 0;
+    }
 
     // ---- IME インライン入力 ----
     case WM_IME_SETCONTEXT:
@@ -439,6 +458,9 @@ LRESULT TerminalView::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_SETFOCUS:
+        // Last-active-client-wins: re-assert this window's size after a peer
+        // client resized the shared PTY.
+        if (sizeMismatch_) ReassertSize();
         // Notify PTY of focus (if focus events enabled)
         if (buffer_.focusEventReportingEnabled())
             if (io_) io_->Write("\x1b[I", 3);
@@ -628,20 +650,85 @@ void TerminalView::UpdateMetrics() {
 // ---------------------------------------------------------------------------
 void TerminalView::OnSize(int w, int h) {
     ReleaseRenderTarget(); // recreate at new size
-    if (w <= 0 || h <= 0 || cellWidth_ <= 0 || cellHeight_ <= 0) return;
 
-    int cols = std::max(10, (int)(w / cellWidth_));
-    int rows = std::max(3,  (int)(h / cellHeight_));
+    int cols = 0;
+    int rows = 0;
+    if (!GridSizeFor(w, h, cols, rows)) return;
 
-    if (cols != buffer_.columns() || rows != buffer_.rows()) {
-        buffer_.resize(cols, rows);
-        if (io_ && io_->IsRunning())
-            io_->Resize(cols, rows);
+    const bool changed = cols != buffer_.columns() || rows != buffer_.rows();
+    if (changed) buffer_.resize(cols, rows);
+    if (io_ && io_->IsRunning()) {
+        if (changed) io_->Resize(cols, rows);
+        // This window is the active client now; a pending peer size is no
+        // longer relevant.
+        sizeMismatch_ = false;
     }
+
     // Clamp scroll offset to new history size after resize
     const int maxScroll = std::max(0, buffer_.historyLineCount());
     scrollOffset_ = std::min(scrollOffset_, maxScroll);
     scrolledBack_ = (scrollOffset_ > 0);
+}
+
+bool TerminalView::GridSizeFor(int w, int h, int& cols, int& rows) const {
+    if (w <= 0 || h <= 0 || cellWidth_ <= 0 || cellHeight_ <= 0) return false;
+    const float usableW = (std::max)(0.0f, (float)w - (float)kScrollBarWidth);
+    cols = (std::max)(2, (int)(usableW / cellWidth_));
+    rows = (std::max)(1, (int)((float)h / cellHeight_));
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// OnRemoteResized — applied size reported by the WCSP server (UI thread)
+// ---------------------------------------------------------------------------
+void TerminalView::OnRemoteResized(const wcs::ResizedInfo& info) {
+    if (!hwnd_) return;
+
+    int cols = std::clamp<int>(info.cols, wcs::kMinColumns, wcs::kMaxDimension);
+    int rows = std::clamp<int>(info.rows, wcs::kMinRows, wcs::kMaxDimension);
+
+    if (info.reason == wcs::ResizeReason::Peer) {
+        // Another client owns the size now. Keep the buffer at that size so
+        // output decodes with the same wrapping the server used; anything
+        // beyond this view is clipped by the renderer.
+        buffer_.resize(cols, rows);
+        sizeMismatch_ = true;
+        scrollOffset_ = 0;
+        scrolledBack_ = false;
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
+
+    // Applied echoes this client's own RESIZE. During a drag several replies
+    // are in flight, so following them would snap the buffer back to stale
+    // sizes; only a Clamped reply carries information the client lacks.
+    if (info.reason != wcs::ResizeReason::Clamped) return;
+    if (cols != buffer_.columns() || rows != buffer_.rows()) {
+        buffer_.resize(cols, rows);
+        const int maxScroll = std::max(0, buffer_.historyLineCount());
+        scrollOffset_ = std::min(scrollOffset_, maxScroll);
+        scrolledBack_ = (scrollOffset_ > 0);
+    }
+    sizeMismatch_ = false;
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+// ---------------------------------------------------------------------------
+// ReassertSize — take the shared PTY back to this window's size
+// ---------------------------------------------------------------------------
+void TerminalView::ReassertSize() {
+    sizeMismatch_ = false;
+    if (!hwnd_ || !io_ || !io_->IsRunning()) return;
+
+    RECT rc; GetClientRect(hwnd_, &rc);
+    int cols = 0;
+    int rows = 0;
+    if (!GridSizeFor(rc.right - rc.left, rc.bottom - rc.top, cols, rows)) return;
+    if (cols != buffer_.columns() || rows != buffer_.rows()) {
+        buffer_.resize(cols, rows);
+        io_->Resize(cols, rows);
+    }
+    ScrollToBottom();
 }
 
 // ---------------------------------------------------------------------------
@@ -1925,6 +2012,9 @@ void TerminalView::OnContextMenu(int screenX, int screenY) {
 // Keyboard input
 // ---------------------------------------------------------------------------
 void TerminalView::OnKeyDown(WPARAM vk, LPARAM /*lParam*/) {
+    // First input after a peer resize: take the PTY back to this window's size.
+    if (sizeMismatch_) ReassertSize();
+
     bool ctrl  = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     bool shift = (GetKeyState(VK_SHIFT)   & 0x8000) != 0;
     bool alt   = (GetKeyState(VK_MENU)    & 0x8000) != 0;
@@ -1987,6 +2077,7 @@ void TerminalView::OnKeyDown(WPARAM vk, LPARAM /*lParam*/) {
 }
 
 void TerminalView::OnChar(wchar_t ch) {
+    if (sizeMismatch_) ReassertSize();
     // Ignore control characters already handled by OnKeyDown
     if (ch < 0x20 || ch == 0x7f) return;
     // IME 確定文字は WM_IME_COMPOSITION (GCS_RESULTSTR) で処理済み——二重送信を防ぐ

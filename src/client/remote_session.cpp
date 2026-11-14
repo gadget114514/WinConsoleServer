@@ -43,6 +43,10 @@ void RemoteSession::SetOutputSink(OutputFn fn) {
     sink_ = std::move(fn);
 }
 
+void RemoteSession::SetResizedHandler(ResizedFn fn) {
+    resized_handler_ = std::move(fn);
+}
+
 bool RemoteSession::Start(const TerminalStartOptions& opt, std::wstring* error) {
     if (running_) return true;
     stopping_ = false;
@@ -204,12 +208,14 @@ bool RemoteSession::Handshake(const TerminalStartOptions& opt, std::wstring* err
                 if (error) *error = L"protocol major version mismatch";
                 return false;
             }
-            if (onResized && (ack.cols != hello.cols || ack.rows != hello.rows)) {
+            if ((ack.cols != hello.cols || ack.rows != hello.rows) &&
+                (onResized || resized_handler_)) {
                 wcs::ResizedInfo info;
                 info.cols = ack.cols;
                 info.rows = ack.rows;
                 info.reason = wcs::ResizeReason::Clamped;
-                onResized(info);
+                if (onResized) onResized(info);
+                if (resized_handler_) resized_handler_(info);
             }
             timeout = 0;
             setsockopt(socket_, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
@@ -258,6 +264,24 @@ void RemoteSession::Resize(int cols, int rows) {
 }
 
 bool RemoteSession::IsRunning() const { return running_; }
+
+void RemoteSession::RequestSessionList() {
+    if (!running_) return;
+    wcs::Frame frame;
+    frame.type = wcs::FrameType::ListSessions;
+    EnqueueFrame(std::move(frame), true);
+}
+
+void RemoteSession::TerminateSession() {
+    if (!running_) {
+        Close();
+        return;
+    }
+    wcs::Frame frame;
+    frame.type = wcs::FrameType::Close;
+    SendFrame(frame);
+    Close();
+}
 
 void RemoteSession::Close() {
     std::lock_guard<std::mutex> closeLock(close_mutex_);
@@ -319,9 +343,9 @@ void RemoteSession::ReceiverLoop() {
         }
         case wcs::FrameType::Resized: {
             wcs::ResizedInfo info;
-            if (wcs::DecodeResized(frame.payload.data(), frame.payload.size(), info) &&
-                onResized) {
-                onResized(info);
+            if (wcs::DecodeResized(frame.payload.data(), frame.payload.size(), info)) {
+                if (onResized) onResized(info);
+                if (resized_handler_) resized_handler_(info);
             }
             break;
         }
@@ -343,6 +367,17 @@ void RemoteSession::ReceiverLoop() {
                 SetError(L"server error");
             }
             stopping_ = true;
+            break;
+        }
+        case wcs::FrameType::SessionList: {
+            std::vector<wcs::SessionInfo> sessions;
+            std::string decodeError;
+            if (wcs::DecodeSessionList(frame.payload.data(), frame.payload.size(),
+                                       sessions, &decodeError)) {
+                if (onSessionList) onSessionList(sessions);
+            } else {
+                SetError(L"bad SESSION_LIST: " + Utf8ToWide(decodeError));
+            }
             break;
         }
         case wcs::FrameType::Pong:
@@ -419,6 +454,7 @@ bool RemoteSession::SendAll(const uint8_t* data, size_t len) {
 
 bool RemoteSession::SendFrame(const wcs::Frame& frame) {
     std::vector<uint8_t> bytes = wcs::EncodeFrame(frame);
+    std::lock_guard<std::mutex> lock(send_mutex_);
     return SendAll(bytes.data(), bytes.size());
 }
 

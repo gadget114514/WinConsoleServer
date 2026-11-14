@@ -105,7 +105,10 @@ add_executable(WinConsoleServer
   src/server/main.cpp
   src/server/server.cpp
   src/server/session.cpp
+  src/server/session_hub.cpp
   src/server/server_config.cpp
+  src/server/terminal_job.cpp
+  src/server/windows_service.cpp
   src/server/app.manifest
 )
 target_include_directories(WinConsoleServer PRIVATE src/server src/common)
@@ -141,6 +144,34 @@ target_link_libraries(WinConsoleTerminal PRIVATE
   ole32
 )
 set_target_properties(WinConsoleTerminal PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${OUTPUT_DIR}/$<CONFIG>"
+)
+
+# ---------------------------------------------------------------------------
+# wct: console (CUI) WCSP terminal client
+# ---------------------------------------------------------------------------
+add_executable(wct
+  src/client/wct_main.cpp
+  src/client/wct_client.cpp
+  src/client/remote_session.cpp
+)
+target_include_directories(wct PRIVATE src/client src/common)
+target_link_libraries(wct PRIVATE wcs_protocol ws2_32)
+set_target_properties(wct PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${OUTPUT_DIR}/$<CONFIG>"
+)
+
+# ---------------------------------------------------------------------------
+# wcs-cli: session administration (list / delete)
+# ---------------------------------------------------------------------------
+add_executable(wcs-cli
+  src/client/wcs_cli_main.cpp
+  src/client/remote_session.cpp
+)
+target_include_directories(wcs-cli PRIVATE src/client src/common)
+target_link_libraries(wcs-cli PRIVATE wcs_protocol ws2_32)
+set_target_properties(wcs-cli PROPERTIES
+  OUTPUT_NAME "wcs-cli"
   RUNTIME_OUTPUT_DIRECTORY "${OUTPUT_DIR}/$<CONFIG>"
 )
 

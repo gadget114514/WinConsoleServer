@@ -14,6 +14,8 @@
 #include <utility>
 #include <vector>
 
+#include "../common/protocol.h"
+
 // Backend interface used by TerminalView.  LocalSession wraps ConPTY;
 // RemoteSession talks to WinConsoleServer.
 struct TerminalStartOptions {
@@ -27,10 +29,13 @@ struct TerminalStartOptions {
 class ITerminalIo {
 public:
     using OutputFn = std::function<void(const char*, size_t)>;
+    // Reports the size the server actually applied (HELLO_ACK / RESIZED).
+    using ResizedFn = std::function<void(const wcs::ResizedInfo&)>;
 
     virtual ~ITerminalIo() = default;
 
     virtual void SetOutputSink(OutputFn fn) = 0;
+    virtual void SetResizedHandler(ResizedFn /*fn*/) {}
     virtual bool Start(const TerminalStartOptions& opt, std::wstring* error) = 0;
 
     virtual void Write(const void* data, size_t len) = 0;
@@ -39,5 +44,8 @@ public:
 
     virtual bool IsRunning() const = 0;
     virtual void Close() = 0;
+    // Ask the server to end the session explicitly (WCSP CLOSE frame).
+    // Close() alone only detaches; the server keeps the session for reconnect.
+    virtual void TerminateSession() {}
     virtual std::wstring LastError() const = 0;
 };

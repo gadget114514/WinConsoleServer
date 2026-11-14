@@ -5,8 +5,15 @@ IDR_MAINMENU MENU
 BEGIN
     POPUP "&File"
     BEGIN
-        MENUITEM "&Connect...",           IDM_CONNECT
-        MENUITEM "&Disconnect",           IDM_DISCONNECT
+        MENUITEM "New &PowerShell session",           IDM_NEW_POWERSHELL
+        MENUITEM "New &cmd session",                  IDM_NEW_CMD
+        MENUITEM "New &bash session",                 IDM_NEW_BASH
+        MENUITEM SEPARATOR
+        MENUITEM "&Attach to session...",             IDM_ATTACH
+        MENUITEM "Connect to &remote...",             IDM_CONNECT
+        MENUITEM SEPARATOR
+        MENUITEM "&Detach (keep session)",            IDM_DISCONNECT
+        MENUITEM "&Close session (terminate)",        IDM_CLOSE_SESSION
         MENUITEM SEPARATOR
         MENUITEM "E&xit",                 IDM_EXIT
     END
@@ -36,4 +43,15 @@ BEGIN
     EDITTEXT        IDC_TOKEN, 60, 70, 165, 13, ES_PASSWORD | ES_AUTOHSCROLL
     DEFPUSHBUTTON   "Connect", IDOK, 118, 104, 50, 16
     PUSHBUTTON      "Cancel", IDCANCEL, 175, 104, 50, 16
+END
+
+IDD_SESSIONS DIALOGEX 0, 0, 340, 190
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Retained sessions"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT           "Select a retained session to attach to:", -1, 10, 10, 320, 8
+    LISTBOX         IDC_SESSION_LIST, 10, 22, 320, 136, LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP
+    DEFPUSHBUTTON   "Attach", IDOK, 218, 166, 50, 16
+    PUSHBUTTON      "Cancel", IDCANCEL, 274, 166, 50, 16
 END

@@ -13,7 +13,7 @@
 namespace wcs {
 
 constexpr uint16_t kProtocolMajor = 1;
-constexpr uint16_t kProtocolMinor = 0;
+constexpr uint16_t kProtocolMinor = 2;
 
 constexpr uint32_t kMaxPayloadBytes = 1024u * 1024u;
 constexpr uint16_t kMaxDimension = 1000;
@@ -39,6 +39,8 @@ enum class FrameType : uint8_t {
     Exit         = 0x22,
     Error        = 0x23,
     Title        = 0x24,
+    ListSessions = 0x30,
+    SessionList  = 0x31,
     Noop         = 0x7F,
 };
 
@@ -56,11 +58,14 @@ enum Feature : uint32_t {
     FeatureImagePassthrough = 1u << 5,
     FeatureClipboardOsc52   = 1u << 6,
     FeatureExitCode         = 1u << 7,
+    FeatureSessionList      = 1u << 8,
+    FeatureSizeSync         = 1u << 9,
 };
 
 constexpr uint32_t kDefaultFeatures =
     FeatureResize | FeaturePriorityInput | FeatureImagePassthrough |
-    FeatureClipboardOsc52 | FeatureExitCode;
+    FeatureClipboardOsc52 | FeatureExitCode | FeatureSessionList |
+    FeatureSizeSync;
 
 enum class ErrorCode : uint16_t {
     InvalidFrame     = 0x0001,
@@ -86,6 +91,7 @@ enum class ExitReason : uint16_t {
 enum class ResizeReason : uint16_t {
     Applied = 0,
     Clamped = 1,
+    Peer    = 2,  // another client changed the shared PTY size
 };
 
 // TLV type ids used by HELLO / HELLO_ACK.
@@ -154,6 +160,19 @@ struct ErrorInfo {
     ErrorCode code = ErrorCode::Internal;
     std::string message;
 };
+
+// One row of SESSION_LIST. state uses the ProcState numbers:
+// 0=running, 1=completed, 2=failed, 3=timed out, 4=idle-timed out, 5=killed.
+struct SessionInfo {
+    uint32_t id = 0;
+    uint8_t state = 0;
+    std::string name;
+    std::string command;
+};
+
+std::vector<uint8_t> EncodeSessionList(const std::vector<SessionInfo>& sessions);
+bool DecodeSessionList(const uint8_t* data, size_t len,
+                       std::vector<SessionInfo>& out, std::string* error = nullptr);
 
 // --- little-endian primitives -------------------------------------------------
 

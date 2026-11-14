@@ -29,6 +29,9 @@
 // Posted by the I/O backend when output is queued for the UI thread.
 #define WM_TERMINAL_OUTPUT      (WM_USER + 200)
 #define WM_TERMINAL_OUTPUT_WAKE (WM_USER + 201)
+// Posted by the WCSP receiver thread when the server reports an applied size.
+// lParam is a heap-allocated wcs::ResizedInfo owned by the window procedure.
+#define WM_TERMINAL_RESIZED     (WM_USER + 202)
 
 // Sent to parent window to report taskbar progress (lParam = 0–10000, or -1 to clear).
 #define WM_TERMINAL_PROGRESS (WM_USER + 299)
@@ -111,6 +114,9 @@ private:
     void    OnTerminalOutput(const char* data, size_t len);
     void    EnqueueOutput(const char* data, size_t len);
     void    DrainOutputQueue();
+    void    OnRemoteResized(const wcs::ResizedInfo& info);
+    void    ReassertSize();
+    bool    GridSizeFor(int w, int h, int& cols, int& rows) const;
 
     // Rendering
     bool EnsureRenderTarget();
@@ -146,6 +152,9 @@ private:
     int  scrollOffset_ = 0;  // lines scrolled back (0 = bottom)
     int  maxScrollOffset_ = 0; // cached historyLineCount at last paint
     bool scrolledBack_ = false; // true when scrollOffset_ > 0
+    // Set when another client resized the shared PTY; this window reasserts
+    // its own size on the next focus or key input.
+    bool sizeMismatch_ = false;
     void ScrollBy(int lines);
     void ScrollToBottom();
     int  VisibleRows() const;

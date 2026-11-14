@@ -16,9 +16,13 @@
 #include "resource.h"
 #include "../common/version.h"
 
+#include <chrono>
+#include <condition_variable>
 #include <cwchar>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <vector>
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shlwapi.lib")
@@ -59,6 +63,16 @@ std::string WideToUtf8Client(const std::wstring& text) {
     return out;
 }
 
+std::wstring Utf8ToWideClient(const std::string& text) {
+    if (text.empty()) return {};
+    int need = MultiByteToWideChar(CP_UTF8, 0, text.data(), (int)text.size(),
+                                   nullptr, 0);
+    if (need <= 0) return {};
+    std::wstring out(need, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.data(), (int)text.size(), out.data(), need);
+    return out;
+}
+
 std::wstring SettingsPath() {
     wchar_t appdata[MAX_PATH] = {};
     if (FAILED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appdata))) {
@@ -73,8 +87,9 @@ void LoadSettings() {
     const std::wstring ini = SettingsPath();
     wchar_t buf[512] = {};
 
-    GetPrivateProfileStringW(L"connection", L"host", L"", buf, 512, ini.c_str());
+    GetPrivateProfileStringW(L"connection", L"host", L"127.0.0.1", buf, 512, ini.c_str());
     g.host = buf;
+    if (g.host.empty()) g.host = L"127.0.0.1";
     g.port = (int)GetPrivateProfileIntW(L"connection", L"port", 7000, ini.c_str());
     GetPrivateProfileStringW(L"connection", L"shell", L"cmd", buf, 512, ini.c_str());
     g.shell = buf;
@@ -247,12 +262,188 @@ INT_PTR CALLBACK ConnectProc(HWND dlg, UINT msg, WPARAM wp, LPARAM) {
     return FALSE;
 }
 
-void ShowConnectDialog() {
+bool ShowConnectDialog(bool start_connection = true) {
     if (DialogBoxParamW(GetModuleHandleW(nullptr),
                         MAKEINTRESOURCEW(IDD_CONNECT), g.hwnd,
-                        ConnectProc, 0) == IDOK) {
+                        ConnectProc, 0) != IDOK) {
+        return false;
+    }
+    if (start_connection) {
         StartConnection(g.host, g.port, g.shell, g.token);
     }
+    return true;
+}
+
+bool QuerySessions(std::vector<wcs::SessionInfo>& sessions, std::wstring* error) {
+    RemoteConfig config;
+    config.host = WideToUtf8Client(g.host);
+    config.port = (uint16_t)g.port;
+    config.token = WideToUtf8Client(g.token);
+    config.features = wcs::kDefaultFeatures;
+
+    RemoteSession session(config);
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool received = false;
+    bool failed = false;
+    std::wstring failure;
+
+    session.onSessionList = [&](const std::vector<wcs::SessionInfo>& list) {
+        std::lock_guard<std::mutex> lock(mutex);
+        sessions = list;
+        received = true;
+        cv.notify_all();
+    };
+    session.onError = [&](const wcs::ErrorInfo& info) {
+        std::lock_guard<std::mutex> lock(mutex);
+        failed = true;
+        failure = Utf8ToWideClient(info.message);
+        cv.notify_all();
+    };
+
+    TerminalStartOptions opt;
+    opt.shell = L"list";
+    opt.cols = 80;
+    opt.rows = 24;
+    std::wstring start_error;
+    if (!session.Start(opt, &start_error)) {
+        if (error) {
+            *error = start_error.empty() ? L"Cannot connect to the server." : start_error;
+        }
+        return false;
+    }
+
+    session.RequestSessionList();
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        cv.wait_for(lock, std::chrono::seconds(5),
+                    [&] { return received || failed; });
+    }
+    session.Close();
+
+    if (failed) {
+        if (error) *error = failure.empty() ? L"Session list request failed." : failure;
+        return false;
+    }
+    if (!received) {
+        if (error) *error = L"Timed out waiting for the session list.";
+        return false;
+    }
+    return true;
+}
+
+struct SessionDialogState {
+    const std::vector<wcs::SessionInfo>* sessions = nullptr;
+};
+
+const wchar_t* SessionStateName(uint8_t state) {
+    switch (state) {
+    case 0: return L"running";
+    case 1: return L"completed";
+    case 2: return L"failed";
+    case 3: return L"timed out";
+    case 4: return L"idle-timed out";
+    case 5: return L"killed";
+    default: return L"unknown";
+    }
+}
+
+INT_PTR CALLBACK SessionsProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_INITDIALOG: {
+        auto* state = reinterpret_cast<SessionDialogState*>(GetWindowLongPtrW(
+            dlg, GWLP_USERDATA));
+        if (!state) {
+            state = reinterpret_cast<SessionDialogState*>(lp);
+            SetWindowLongPtrW(dlg, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+        }
+        HWND list = GetDlgItem(dlg, IDC_SESSION_LIST);
+        if (state && state->sessions && list) {
+            for (const auto& s : *state->sessions) {
+                std::wstring label = std::to_wstring(s.id);
+                label += L"  [";
+                label += SessionStateName(s.state);
+                label += L"]  ";
+                label += Utf8ToWideClient(s.name);
+                if (!s.command.empty()) {
+                    label += L"  -  ";
+                    label += Utf8ToWideClient(s.command);
+                }
+                SendMessageW(list, LB_ADDSTRING, 0, (LPARAM)label.c_str());
+            }
+            if (!state->sessions->empty()) {
+                SendMessageW(list, LB_SETCURSEL, 0, 0);
+            }
+        }
+        return TRUE;
+    }
+
+    case WM_COMMAND:
+        switch (LOWORD(wp)) {
+        case IDOK: {
+            HWND list = GetDlgItem(dlg, IDC_SESSION_LIST);
+            int sel = list ? (int)SendMessageW(list, LB_GETCURSEL, 0, 0) : -1;
+            if (sel < 0) {
+                MessageBoxW(dlg, L"Select a session.", L"Attach", MB_ICONWARNING);
+                return TRUE;
+            }
+            EndDialog(dlg, sel + 1);
+            return TRUE;
+        }
+        case IDCANCEL:
+            EndDialog(dlg, 0);
+            return TRUE;
+        default:
+            break;
+        }
+        break;
+    }
+    return FALSE;
+}
+
+int RunSessionsDialog(const std::vector<wcs::SessionInfo>& sessions) {
+    SessionDialogState state;
+    state.sessions = &sessions;
+    INT_PTR result = DialogBoxParamW(GetModuleHandleW(nullptr),
+                                     MAKEINTRESOURCEW(IDD_SESSIONS), g.hwnd,
+                                     SessionsProc,
+                                     reinterpret_cast<LPARAM>(&state));
+    if (result <= 0) return -1;
+    return (int)result - 1;
+}
+
+void NewSession(const wchar_t* shell) {
+    StartConnection(g.host, g.port, shell, g.token);
+}
+
+void AttachSession() {
+    std::vector<wcs::SessionInfo> sessions;
+    std::wstring error;
+    if (!QuerySessions(sessions, &error)) {
+        MessageBoxW(g.hwnd, error.c_str(), L"Attach to session", MB_ICONERROR);
+        return;
+    }
+    if (sessions.empty()) {
+        MessageBoxW(g.hwnd, L"There are no retained sessions.",
+                    L"Attach to session", MB_ICONINFORMATION);
+        return;
+    }
+    int index = RunSessionsDialog(sessions);
+    if (index < 0 || index >= (int)sessions.size()) return;
+
+    const auto& selected = sessions[(size_t)index];
+    std::wstring target = L"attach:" + std::to_wstring(selected.id);
+    StartConnection(g.host, g.port, target, g.token);
+}
+
+void CloseSession() {
+    if (!g.session) {
+        SetStatus(L"no session", 0);
+        return;
+    }
+    g.session->TerminateSession();
+    g.session = nullptr;
+    SetStatus(L"session closed", 0);
 }
 
 LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -298,11 +489,27 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_COMMAND:
         switch (LOWORD(wp)) {
+        case IDM_NEW_POWERSHELL:
+            NewSession(L"powershell");
+            return 0;
+        case IDM_NEW_CMD:
+            NewSession(L"cmd");
+            return 0;
+        case IDM_NEW_BASH:
+            NewSession(L"bash");
+            return 0;
+        case IDM_ATTACH:
+            AttachSession();
+            return 0;
         case IDM_CONNECT:
             ShowConnectDialog();
             return 0;
         case IDM_DISCONNECT:
             Disconnect();
+            SetStatus(L"detached (session kept)", 0);
+            return 0;
+        case IDM_CLOSE_SESSION:
+            CloseSession();
             return 0;
         case IDM_EXIT:
             PostMessageW(hwnd, WM_CLOSE, 0, 0);
@@ -356,7 +563,22 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
 
     case WM_CLOSE:
-        Disconnect();
+        if (g.session) {
+            const int choice = MessageBoxW(
+                hwnd,
+                L"Terminate the remote session?\n\n"
+                L"Yes: terminate the session (WCSP CLOSE).\n"
+                L"No: detach and keep it running for a later attach.\n"
+                L"Cancel: keep the window open.",
+                L"WinConsoleTerminal", MB_YESNOCANCEL | MB_ICONQUESTION);
+            if (choice == IDCANCEL) return 0;
+            if (choice == IDYES) {
+                g.session->TerminateSession();
+            } else {
+                g.session->Close();
+            }
+            g.session = nullptr;
+        }
         DestroyWindow(hwnd);
         return 0;
 

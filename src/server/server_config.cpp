@@ -182,10 +182,35 @@ bool ParseServerArgs(int argc, wchar_t** argv, ServerConfig& cfg,
             std::wstring value;
             if (!next(value)) { if (error) *error = L"--token requires a value"; return false; }
             cfg.token = WideToUtf8Server(value);
+        } else if (arg == L"--token-file") {
+            std::wstring value;
+            if (!next(value)) { if (error) *error = L"--token-file requires a value"; return false; }
+            cfg.token_file = WideToUtf8Server(value);
         } else if (arg == L"--max-sessions") {
             std::wstring value;
             if (!next(value)) { if (error) *error = L"--max-sessions requires a value"; return false; }
             cfg.max_sessions = std::max(1, _wtoi(value.c_str()));
+        } else if (arg == L"--history-bytes") {
+            std::wstring value;
+            if (!next(value)) { if (error) *error = L"--history-bytes requires a value"; return false; }
+            long long bytes = std::wcstoll(value.c_str(), nullptr, 10);
+            if (bytes < 64 * 1024) bytes = 64 * 1024;
+            if (bytes > 64ll * 1024 * 1024) bytes = 64ll * 1024 * 1024;
+            cfg.history_bytes = static_cast<size_t>(bytes);
+        } else if (arg == L"--service") {
+            cfg.run_as_service = true;
+        } else if (arg == L"--install-service") {
+            cfg.install_service = true;
+        } else if (arg == L"--uninstall-service") {
+            cfg.uninstall_service = true;
+        } else if (arg == L"--service-name") {
+            std::wstring value;
+            if (!next(value)) { if (error) *error = L"--service-name requires a value"; return false; }
+            cfg.service_name = WideToUtf8Server(value);
+        } else if (arg == L"--log-file") {
+            std::wstring value;
+            if (!next(value)) { if (error) *error = L"--log-file requires a value"; return false; }
+            cfg.log_file = WideToUtf8Server(value);
         } else if (arg == L"--allow-arbitrary-shell") {
             cfg.allow_arbitrary_shell = true;
         } else if (arg == L"--verbose" || arg == L"-V") {
@@ -196,13 +221,111 @@ bool ParseServerArgs(int argc, wchar_t** argv, ServerConfig& cfg,
                     L"  --shell cmd|powershell|bash\n"
                     L"  --cwd path\n"
                     L"  --token secret\n"
+                    L"  --token-file path          read the token from a file\n"
                     L"  --max-sessions N\n"
+                    L"  --history-bytes N          replay buffer per job (64 KiB..64 MiB)\n"
                     L"  --allow-arbitrary-shell\n"
+                    L"  --log-file path            append server logs to a file\n"
+                    L"  --service                  run under the Service Control Manager\n"
+                    L"  --install-service          install as a Windows service (admin)\n"
+                    L"  --uninstall-service        remove the Windows service (admin)\n"
+                    L"  --service-name name        service name (default WinConsoleServer)\n"
                     L"  --verbose\n");
             return false;
         } else {
             if (error) *error = L"unknown argument: " + arg;
             return false;
+        }
+    }
+    return true;
+}
+
+namespace {
+
+std::wstring Win32ErrorText(DWORD code);
+
+std::string TrimAscii(std::string text) {
+    auto is_space = [](unsigned char c) {
+        return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+    };
+    size_t begin = 0;
+    while (begin < text.size() && is_space((unsigned char)text[begin])) ++begin;
+    size_t end = text.size();
+    while (end > begin && is_space((unsigned char)text[end - 1])) --end;
+    return text.substr(begin, end - begin);
+}
+
+bool ReadTokenFile(const std::wstring& path, std::string& out,
+                   std::wstring* error) {
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                              nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        if (error) {
+            *error = L"cannot open token file: " + path + L" (" +
+                     Win32ErrorText(GetLastError()) + L")";
+        }
+        return false;
+    }
+
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart < 0 ||
+        size.QuadPart > 1024 * 1024) {
+        CloseHandle(file);
+        if (error) *error = L"invalid token file size: " + path;
+        return false;
+    }
+
+    out.assign(static_cast<size_t>(size.QuadPart), '\0');
+    DWORD read = 0;
+    const BOOL ok = out.empty()
+                        ? TRUE
+                        : ReadFile(file, out.data(), (DWORD)out.size(), &read,
+                                   nullptr);
+    CloseHandle(file);
+    if (!ok || read != out.size()) {
+        if (error) *error = L"cannot read token file: " + path;
+        return false;
+    }
+    out = TrimAscii(std::move(out));
+    if (out.empty()) {
+        if (error) *error = L"token file is empty: " + path;
+        return false;
+    }
+    return true;
+}
+
+std::wstring Win32ErrorText(DWORD code) {
+    LPWSTR buffer = nullptr;
+    FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+                       FORMAT_MESSAGE_IGNORE_INSERTS,
+                   nullptr, code, 0, reinterpret_cast<LPWSTR>(&buffer), 0,
+                   nullptr);
+    std::wstring message = buffer ? buffer : L"unknown error";
+    if (buffer) LocalFree(buffer);
+    while (!message.empty() &&
+           (message.back() == L'\r' || message.back() == L'\n')) {
+        message.pop_back();
+    }
+    return message;
+}
+
+} // namespace
+
+bool ResolveServerToken(ServerConfig& cfg, std::wstring* error) {
+    if (!cfg.token.empty()) return true;
+
+    if (!cfg.token_file.empty()) {
+        return ReadTokenFile(Utf8ToWideServer(cfg.token_file), cfg.token, error);
+    }
+
+    DWORD length = GetEnvironmentVariableW(L"WCS_TOKEN", nullptr, 0);
+    if (length > 0) {
+        std::wstring value(length, L'\0');
+        DWORD got = GetEnvironmentVariableW(L"WCS_TOKEN", value.data(), length);
+        if (got > 0) {
+            value.resize(got);
+            cfg.token = TrimAscii(WideToUtf8Server(value));
         }
     }
     return true;

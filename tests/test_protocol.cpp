@@ -98,6 +98,14 @@ void TestSmallMessages() {
     CHECK(wcs::DecodeResized(zb.data(), zb.size(), zout));
     CHECK(zout.reason == wcs::ResizeReason::Clamped);
 
+    wcs::ResizedInfo peer{ 120, 40, wcs::ResizeReason::Peer };
+    auto pb2 = wcs::EncodeResized(peer);
+    CHECK(wcs::DecodeResized(pb2.data(), pb2.size(), zout));
+    CHECK(zout.cols == 120 && zout.rows == 40);
+    CHECK(zout.reason == wcs::ResizeReason::Peer);
+    CHECK(wcs::kProtocolMinor == 2);
+    CHECK((wcs::kDefaultFeatures & wcs::FeatureSizeSync) != 0);
+
     wcs::ExitInfo exit{ wcs::ExitReason::ChildExited, 7 };
     auto eb = wcs::EncodeExit(exit);
     wcs::ExitInfo eout;
@@ -118,6 +126,32 @@ void TestSmallMessages() {
     CHECK(nonce == 0x1122334455667788ull);
 }
 
+void TestSessionListRoundTrip() {
+    std::vector<wcs::SessionInfo> sessions;
+    sessions.push_back({ 7, 0, "wcsp-powershell", "powershell.exe" });
+    sessions.push_back({ 3, 1, "wcsp-cmd", "cmd.exe" });
+
+    auto bytes = wcs::EncodeSessionList(sessions);
+    std::vector<wcs::SessionInfo> out;
+    std::string error;
+    CHECK(wcs::DecodeSessionList(bytes.data(), bytes.size(), out, &error));
+    CHECK(out.size() == 2);
+    CHECK(out[0].id == 7 && out[0].state == 0);
+    CHECK(out[0].name == "wcsp-powershell");
+    CHECK(out[0].command == "powershell.exe");
+    CHECK(out[1].id == 3 && out[1].state == 1);
+    CHECK(out[1].name == "wcsp-cmd");
+
+    std::vector<wcs::SessionInfo> empty;
+    auto emptyBytes = wcs::EncodeSessionList(empty);
+    CHECK(wcs::DecodeSessionList(emptyBytes.data(), emptyBytes.size(), out, &error));
+    CHECK(out.empty());
+
+    auto truncated = bytes;
+    truncated.resize(truncated.size() - 3);
+    CHECK(!wcs::DecodeSessionList(truncated.data(), truncated.size(), out, &error));
+}
+
 void TestBadInput() {
     wcs::Hello out;
     std::string error;
@@ -136,6 +170,7 @@ int main() {
     TestHelloAckRoundTrip();
     TestFrameRoundTrip();
     TestSmallMessages();
+    TestSessionListRoundTrip();
     TestBadInput();
 
     if (failures == 0) {
