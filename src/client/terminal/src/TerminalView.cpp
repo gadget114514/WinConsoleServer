@@ -156,20 +156,22 @@ bool TerminalView::StartSession(const TerminalStartOptions& opt, std::wstring* e
     codePage_ = opt.codePage;
     buffer_.setAmbiguousWide(codePage_ == 932);
 
-    TerminalStartOptions effective = opt;
-    if (effective.cols <= 0) effective.cols = (int)buffer_.columns();
-    if (effective.rows <= 0) effective.rows = (int)buffer_.rows();
+    // Do not derive a grid from the tiny 100x100 placeholder window used
+    // during CreateWindowExW. The real layout or WM_SIZE will size it later.
+    int cols = opt.cols > 0 ? opt.cols : 80;
+    int rows = opt.rows > 0 ? opt.rows : 25;
     if (hwnd_) {
         RECT rc; GetClientRect(hwnd_, &rc);
         if (rc.right - rc.left > 120 && rc.bottom - rc.top > 100) {
-            int cols = 0;
-            int rows = 0;
-            if (GridSizeFor(rc.right - rc.left, rc.bottom - rc.top, cols, rows)) {
-                effective.cols = cols;
-                effective.rows = rows;
+            if (!GridSizeFor(rc.right - rc.left, rc.bottom - rc.top, cols, rows)) {
+                cols = 80;
+                rows = 25;
             }
         }
     }
+    TerminalStartOptions effective = opt;
+    effective.cols = cols;
+    effective.rows = rows;
     buffer_.resize(effective.cols, effective.rows);
 
     io_->SetOutputSink([this](const char* data, size_t len) {
@@ -651,6 +653,11 @@ void TerminalView::UpdateMetrics() {
 void TerminalView::OnSize(int w, int h) {
     ReleaseRenderTarget(); // recreate at new size
 
+    // The 100x100 size used while the child window is created (and 0x0 while
+    // hidden) is not a real layout. Leave the buffer at its initial size; the
+    // real WM_SIZE will size it.
+    if (w <= 120 || h <= 100) return;
+
     int cols = 0;
     int rows = 0;
     if (!GridSizeFor(w, h, cols, rows)) return;
@@ -721,6 +728,7 @@ void TerminalView::ReassertSize() {
     if (!hwnd_ || !io_ || !io_->IsRunning()) return;
 
     RECT rc; GetClientRect(hwnd_, &rc);
+    if (rc.right - rc.left <= 120 || rc.bottom - rc.top <= 100) return;
     int cols = 0;
     int rows = 0;
     if (!GridSizeFor(rc.right - rc.left, rc.bottom - rc.top, cols, rows)) return;

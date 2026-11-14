@@ -2,7 +2,7 @@
 ; Inno Setup 6
 
 #define MyAppName "WinConsoleServer"
-#define MyAppVersion "0.4.0"
+#define MyAppVersion "0.4.1"
 #define MyAppPublisher "WinConsoleServer Project"
 #define MyAppURL "https://example.invalid/WinConsoleServer"
 #define MyAppExeName "WinConsoleTerminal.exe"

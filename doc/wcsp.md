@@ -116,7 +116,7 @@ Strings are UTF-8 without a NUL terminator. `ENV` may appear more than once. Unk
 | :--- | :--- | :--- |
 | `MAGIC` | yes | `WCSP`. |
 | `VERSION` | yes | Must be `1.x`; the server rejects a different major version. |
-| `NAME` | no | Display name (for example `WinConsoleTerminal/0.4.0`). |
+| `NAME` | no | Display name (for example `WinConsoleTerminal/0.4.1`). |
 | `FEATURES` | no | Requested features. Missing means `0`. |
 | `SIZE` | yes | Requested `cols` × `rows`. |
 | `SHELL` | yes | `cmd`, `powershell`, `bash`, `attach:<id>`, `list` (control session), or `delete:<id>` (delete a retained session). |

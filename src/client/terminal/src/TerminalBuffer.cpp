@@ -1,6 +1,7 @@
 #include "../include/TerminalBuffer.h"
 #include <algorithm>
 #include <cassert>
+#include <iterator>
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -76,10 +77,18 @@ void TerminalBuffer::resize(int columns, int rows) {
         normalizeWideCells(line);
         screen_.push_back(std::move(line));
     }
-    // Count rows inserted at the top; shift cursor to stay at same content row
+    // Count rows inserted at the top; shift cursor to stay at same content row.
+    // Insert all blanks at once: inserting one row at a time is O(N^2) and
+    // moves every existing line on each call.
     const int insertCount = rows_ - (int)screen_.size();
-    while ((int)screen_.size() < rows_)
-        screen_.insert(screen_.begin(), blankLine());
+    if (insertCount > 0) {
+        std::vector<Line> blanks;
+        blanks.reserve(insertCount);
+        for (int i = 0; i < insertCount; ++i) blanks.push_back(blankLine());
+        screen_.insert(screen_.begin(),
+                       std::make_move_iterator(blanks.begin()),
+                       std::make_move_iterator(blanks.end()));
+    }
     if (insertCount > 0 && !oldScreen.empty()) {
         cursorRow_         += insertCount;
         savedCursorRow_    += insertCount;
@@ -166,17 +175,26 @@ void TerminalBuffer::putText(const std::wstring& text, const TerminalCell& attri
     // combining / zero-width: attach to preceding cell
     if (width == 0) {
         int targetColumn = cursorColumn_ - 1;
-        if (targetColumn >= 0 && screen_[cursorRow_][targetColumn].wideContinuation)
-            --targetColumn;
-        if (targetColumn >= 0)
-            screen_[cursorRow_][targetColumn].text += text;
+        if (cursorRow_ >= 0 && cursorRow_ < (int)screen_.size()) {
+            if (targetColumn >= 0 &&
+                targetColumn < (int)screen_[cursorRow_].size() &&
+                screen_[cursorRow_][targetColumn].wideContinuation)
+                --targetColumn;
+            if (targetColumn >= 0 &&
+                targetColumn < (int)screen_[cursorRow_].size())
+                screen_[cursorRow_][targetColumn].text += text;
+        }
         return;
     }
 
     if (pendingWrap_) {
         // mark current line as soft-wrapped before advancing
-        if (!screen_.empty())
-            screen_[cursorRow_][std::max(0, effectiveRight())].softWrapped = true;
+        if (!screen_.empty() && cursorRow_ >= 0 &&
+            cursorRow_ < (int)screen_.size()) {
+            int rightCol = std::max(0, effectiveRight());
+            if (rightCol < (int)screen_[cursorRow_].size())
+                screen_[cursorRow_][rightCol].softWrapped = true;
+        }
         carriageReturn();
         lineFeed();
         pendingWrap_ = false;
@@ -184,12 +202,16 @@ void TerminalBuffer::putText(const std::wstring& text, const TerminalCell& attri
 
     // ZWJ cluster: attach to preceding cell
     int prevCol = cursorColumn_ - 1;
-    if (prevCol >= 0 && screen_[cursorRow_][prevCol].wideContinuation)
-        --prevCol;
-    if (prevCol >= 0 && !screen_[cursorRow_][prevCol].text.empty() &&
-        screen_[cursorRow_][prevCol].text.back() == wchar_t(0x200d)) {
-        screen_[cursorRow_][prevCol].text += text;
-        return;
+    if (cursorRow_ >= 0 && cursorRow_ < (int)screen_.size()) {
+        if (prevCol >= 0 && prevCol < (int)screen_[cursorRow_].size() &&
+            screen_[cursorRow_][prevCol].wideContinuation)
+            --prevCol;
+        if (prevCol >= 0 && prevCol < (int)screen_[cursorRow_].size() &&
+            !screen_[cursorRow_][prevCol].text.empty() &&
+            screen_[cursorRow_][prevCol].text.back() == wchar_t(0x200d)) {
+            screen_[cursorRow_][prevCol].text += text;
+            return;
+        }
     }
 
     const int eR = effectiveRight();
@@ -197,8 +219,12 @@ void TerminalBuffer::putText(const std::wstring& text, const TerminalCell& attri
     // autowrap: if character doesn't fit and DECAWM is set, wrap now.
     // When DECAWM is off the character at the right margin is overwritten in-place.
     if (autoWrapEnabled_ && cursorColumn_ + width > eR + 1) {
-        if (!screen_.empty())
-            screen_[cursorRow_][std::max(0, eR)].softWrapped = true;
+        if (!screen_.empty() && cursorRow_ >= 0 &&
+            cursorRow_ < (int)screen_.size()) {
+            int rightCol = std::max(0, eR);
+            if (rightCol < (int)screen_[cursorRow_].size())
+                screen_[cursorRow_][rightCol].softWrapped = true;
+        }
         carriageReturn();
         lineFeed();
     }
@@ -214,13 +240,19 @@ void TerminalBuffer::putText(const std::wstring& text, const TerminalCell& attri
     if (width == 2 && cursorColumn_ + 1 < columns_)
         eraseCell(cursorRow_, cursorColumn_ + 1);
 
-    screen_[cursorRow_][cursorColumn_] = cell;
+    if (cursorRow_ >= 0 && cursorRow_ < (int)screen_.size()) {
+        if (cursorColumn_ >= 0 &&
+            cursorColumn_ < (int)screen_[cursorRow_].size()) {
+            screen_[cursorRow_][cursorColumn_] = cell;
+        }
 
-    if (width == 2 && cursorColumn_ + 1 < columns_) {
-        TerminalCell cont;
-        cont.text.clear();
-        cont.wideContinuation = true;
-        screen_[cursorRow_][cursorColumn_ + 1] = cont;
+        if (width == 2 && cursorColumn_ + 1 < columns_ &&
+            cursorColumn_ + 1 < (int)screen_[cursorRow_].size()) {
+            TerminalCell cont;
+            cont.text.clear();
+            cont.wideContinuation = true;
+            screen_[cursorRow_][cursorColumn_ + 1] = cont;
+        }
     }
 
     cursorColumn_ += width;
@@ -882,6 +914,9 @@ void TerminalBuffer::normalizeWideCells(Line& line) {
 }
 
 void TerminalBuffer::resizeLines(std::vector<Line>& lines, int oldColumns) {
+    // An empty alternate screen has no content to preserve. Filling it with
+    // dummy rows here only creates churn during the initial tiny WM_SIZE.
+    if (lines.empty()) return;
     std::vector<Line> oldScreen = lines;
     lines.clear();
     lines.reserve(rows_);
@@ -898,8 +933,15 @@ void TerminalBuffer::resizeLines(std::vector<Line>& lines, int oldColumns) {
         normalizeWideCells(line);
         lines.push_back(std::move(line));
     }
-    while ((int)lines.size() < rows_)
-        lines.insert(lines.begin(), blankLine());
+    const int insertCount = rows_ - (int)lines.size();
+    if (insertCount > 0) {
+        std::vector<Line> blanks;
+        blanks.reserve(insertCount);
+        for (int i = 0; i < insertCount; ++i) blanks.push_back(blankLine());
+        lines.insert(lines.begin(),
+                     std::make_move_iterator(blanks.begin()),
+                     std::make_move_iterator(blanks.end()));
+    }
 }
 
 void TerminalBuffer::eraseCell(int row, int column, const TerminalCell& attrs) {
@@ -1083,9 +1125,18 @@ void TerminalBuffer::copyRect(int top, int left, int bottom, int right,
     else                  { cStart = width - 1; cEnd = -1; cStep = -1; }
 
     for (int r = rStart; r != rEnd; r += rStep) {
-        int dr = dTop + r;
+        // destTop/destLeft may be negative. Clamping them into dTop/dLef is
+        // only for the overlap direction; the actual target row/column must
+        // still be checked before touching the screen.
+        int dr = destTop + r;
+        if (dr < dTop || dr > dBottom || dr < 0 ||
+            dr >= (int)screen_.size())
+            continue;
         for (int c = cStart; c != cEnd; c += cStep) {
-            int dc = dLeft + c;
+            int dc = destLeft + c;
+            if (dc < dLeft || dc > dRight || dc < 0 ||
+                dc >= (int)screen_[dr].size())
+                continue;
             eraseCell(dr, dc);
             screen_[dr][dc] = src[r][c];
         }
