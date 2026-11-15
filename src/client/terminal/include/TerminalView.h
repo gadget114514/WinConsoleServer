@@ -227,6 +227,9 @@ private:
     bool   textBlinkOn_   = true;   // current visible phase
     bool   hasBlinkCells_ = false;  // set during paint; controls full-window invalidation
 
+    // Synchronized output (?2026): repaint deadline while updates are batched.
+    ULONGLONG syncSinceTick_ = 0;
+
     // Output queue: I/O thread pushes, UI thread drains (WM_TERMINAL_OUTPUT_WAKE).
     std::mutex outputMutex_;
     std::deque<std::vector<uint8_t>> outputQueue_;

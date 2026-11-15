@@ -559,6 +559,14 @@ LRESULT TerminalView::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             textBlinkOn_ = !textBlinkOn_;
             if (hasBlinkCells_)
                 InvalidateRect(hwnd, nullptr, FALSE);
+
+            // Synchronized output fallback: force a paint if the app never
+            // sent the closing ?2026l.
+            if (buffer_.syncOutputEnabled() && syncSinceTick_ != 0 &&
+                GetTickCount64() - syncSinceTick_ >= 100) {
+                syncSinceTick_ = GetTickCount64();
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
         }
         return 0;
     }
@@ -848,9 +856,16 @@ void TerminalView::OnTerminalOutput(const char* data, size_t len) {
     emulator_.process(ws);
     bool hadUnsupported = emulator_.consumeUnsupportedFlag();
 
-    // flush if not inside a synchronised update (?2026)
-    if (!buffer_.syncOutputEnabled())
+    // Wait for the end of a synchronized update (?2026l) before painting, but
+    // never leave the view frozen if the app forgets to reset the mode.
+    if (buffer_.syncOutputEnabled()) {
+        if (syncSinceTick_ == 0) syncSinceTick_ = GetTickCount64();
+        if (GetTickCount64() - syncSinceTick_ >= 100)
+            InvalidateRect(hwnd_, nullptr, FALSE);
+    } else {
+        syncSinceTick_ = 0;
         InvalidateRect(hwnd_, nullptr, FALSE);
+    }
 
     // VT debug: send raw ESC sequences to parent's *Messages* buffer
     // Cache the value to avoid reading settings.ini from disk on every chunk.

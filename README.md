@@ -142,7 +142,7 @@ bin\Release\
   tests\term_server_smoke.exe
 
 dist\
-  WinConsoleServerSetup-0.6.0.exe
+  WinConsoleServerSetup-0.6.1.exe
 ```
 
 ## 使い方
@@ -293,13 +293,13 @@ sc.exe stop WinConsoleServer
 ### 6. インストーラ
 
 ```powershell
-.\dist\WinConsoleServerSetup-0.6.0.exe
+.\dist\WinConsoleServerSetup-0.6.1.exe
 ```
 
 サイレントインストール:
 
 ```powershell
-.\dist\WinConsoleServerSetup-0.6.0.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+.\dist\WinConsoleServerSetup-0.6.1.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 ```
 
 インストーラは任意で Windows ファイアウォールの TCP 7000 許可ルールを追加します。
