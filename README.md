@@ -142,7 +142,7 @@ bin\Release\
   tests\term_server_smoke.exe
 
 dist\
-  WinConsoleServerSetup-0.6.1.exe
+  WinConsoleServerSetup-0.6.2.exe
 ```
 
 ## 使い方
@@ -200,6 +200,7 @@ dist\
 - **Reconnect to same session**: `JOB_ID` を使って同じ保持セッションへ再接続
 - **Detach (keep session)**: 切断だけ行い、サーバ側ジョブを保持
 - **Close session (terminate)**: `CLOSE` を送り、サーバ側ジョブを終了
+- **Close all windows and sessions**: 全ウィンドウを閉じ、サーバ上の保持セッションをすべて終了
 
 接続が切れた場合、`WinConsoleTerminal` はサーバから通知された `JOB_ID` を使って
 同じセッションへ自動再接続します（バックオフ付き）。無効化するには
@@ -293,13 +294,13 @@ sc.exe stop WinConsoleServer
 ### 6. インストーラ
 
 ```powershell
-.\dist\WinConsoleServerSetup-0.6.1.exe
+.\dist\WinConsoleServerSetup-0.6.2.exe
 ```
 
 サイレントインストール:
 
 ```powershell
-.\dist\WinConsoleServerSetup-0.6.1.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+.\dist\WinConsoleServerSetup-0.6.2.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 ```
 
 インストーラは任意で Windows ファイアウォールの TCP 7000 許可ルールを追加します。

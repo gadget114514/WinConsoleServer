@@ -39,6 +39,8 @@ constexpr UINT WM_APP_EXIT        = WM_APP + 3;
 constexpr UINT WM_APP_RESIZED     = WM_APP + 4;
 constexpr UINT WM_APP_AUTO_RECONNECT = WM_APP + 5;
 constexpr UINT WM_APP_AUTO_RECONNECT_FAILED = WM_APP + 6;
+// wParam 1 = prepare (detach and stop reconnecting), 0 = destroy the window.
+constexpr UINT WM_APP_CLOSE_ALL = WM_APP + 7;
 
 constexpr UINT_PTR kConnectionTimerId = 1;
 
@@ -784,6 +786,103 @@ void CloseSession() {
     SetStatus(L"session closed", 0);
 }
 
+BOOL CALLBACK CloseAllWindowsProc(HWND hwnd, LPARAM prepare) {
+    wchar_t class_name[64] = {};
+    if (GetClassNameW(hwnd, class_name, 64) == 0) return TRUE;
+    if (wcscmp(class_name, kMainClass) != 0) return TRUE;
+
+    if (prepare) {
+        DWORD_PTR result = 0;
+        SendMessageTimeoutW(hwnd, WM_APP_CLOSE_ALL, 1, 0,
+                            SMTO_ABORTIFHUNG, 1000, &result);
+    } else {
+        PostMessageW(hwnd, WM_APP_CLOSE_ALL, 0, 0);
+    }
+    return TRUE;
+}
+
+bool DeleteSessionById(uint32_t id, std::wstring* error) {
+    RemoteConfig config;
+    config.host = WideToUtf8Client(g.host);
+    config.port = static_cast<uint16_t>(g.port);
+    config.token = WideToUtf8Client(g.token);
+    config.features = wcs::kDefaultFeatures;
+
+    RemoteSession session(config);
+    TerminalStartOptions opt;
+    opt.shell = L"delete:" + std::to_wstring(id);
+    opt.cols = 80;
+    opt.rows = 24;
+
+    std::wstring start_error;
+    if (!session.Start(opt, &start_error)) {
+        if (error) {
+            *error = start_error.empty()
+                         ? L"delete failed for session #" + std::to_wstring(id)
+                         : start_error;
+        }
+        return false;
+    }
+    session.Close();
+    return true;
+}
+
+void CloseAllSessionsAndWindows() {
+    const std::wstring endpoint =
+        g.host + L":" + std::to_wstring(g.port);
+    const std::wstring confirm =
+        L"Close all WinConsoleTerminal windows and terminate every retained "
+        L"session on " + endpoint + L"?\n\n"
+        L"This cannot be undone.";
+    if (MessageBoxW(g.hwnd, confirm.c_str(), L"Close all windows and sessions",
+                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+        return;
+    }
+
+    std::vector<wcs::SessionInfo> sessions;
+    std::wstring error;
+    const bool have_list = QuerySessions(sessions, &error);
+    if (!have_list) {
+        std::wstring warning =
+            L"Could not list retained sessions";
+        if (!error.empty()) warning += L":\n" + error;
+        warning +=
+            L"\n\nClose all terminal windows anyway?\n"
+            L"The sessions will be detached, not terminated.";
+        if (MessageBoxW(g.hwnd, warning.c_str(),
+                        L"Close all windows and sessions",
+                        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+            return;
+        }
+    }
+
+    // Stop reconnecting and detach every client before deleting the jobs.
+    EnumWindows(CloseAllWindowsProc, 1);
+
+    int failed = 0;
+    std::wstring first_error;
+    if (have_list) {
+        for (const auto& session : sessions) {
+            std::wstring delete_error;
+            if (!DeleteSessionById(session.id, &delete_error)) {
+                ++failed;
+                if (first_error.empty()) first_error = delete_error;
+            }
+        }
+    }
+
+    if (failed > 0) {
+        std::wstring message =
+            L"Failed to terminate " + std::to_wstring(failed) + L" session(s).";
+        if (!first_error.empty()) message += L"\n\n" + first_error;
+        message += L"\n\nThe terminal windows will still be closed.";
+        MessageBoxW(g.hwnd, message.c_str(), L"Close all windows and sessions",
+                    MB_ICONWARNING);
+    }
+
+    EnumWindows(CloseAllWindowsProc, 0);
+}
+
 LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
@@ -856,6 +955,9 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case IDM_CLOSE_SESSION:
             CloseSession();
             return 0;
+        case IDM_CLOSE_ALL:
+            CloseAllSessionsAndWindows();
+            return 0;
         case IDM_EXIT:
             PostMessageW(hwnd, WM_CLOSE, 0, 0);
             return 0;
@@ -927,6 +1029,20 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetStatus(std::to_wstring(cols) + L" x " + std::to_wstring(rows), 3);
         return 0;
     }
+
+    case WM_APP_CLOSE_ALL:
+        g.closing = true;
+        KillTimer(hwnd, kConnectionTimerId);
+        CancelScheduledReconnect();
+        CloseCurrentSession();
+        g.server_job_id = 0;
+        g.state = ConnectionState::Idle;
+        if (wp == 1) {
+            UpdateStatus();
+            return 0;
+        }
+        DestroyWindow(hwnd);
+        return 0;
 
     case WM_TIMER:
         if (wp == kConnectionTimerId) {

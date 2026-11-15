@@ -16,6 +16,7 @@ BEGIN
         MENUITEM SEPARATOR
         MENUITEM "&Detach (keep session)",            IDM_DISCONNECT
         MENUITEM "&Close session (terminate)",        IDM_CLOSE_SESSION
+        MENUITEM "Close all windows and &sessions",   IDM_CLOSE_ALL
         MENUITEM SEPARATOR
         MENUITEM "E&xit",                 IDM_EXIT
     END

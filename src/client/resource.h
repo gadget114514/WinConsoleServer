@@ -18,6 +18,7 @@
 #define IDM_CLOSE_SESSION   40011
 #define IDM_ATTACH_ALL      40012
 #define IDM_RECONNECT       40013
+#define IDM_CLOSE_ALL       40014
 
 #define IDC_HOST            1001
 #define IDC_PORT            1002
