@@ -12,6 +12,7 @@ BEGIN
         MENUITEM "&Attach to session...",             IDM_ATTACH
         MENUITEM "Attach to &all running sessions",   IDM_ATTACH_ALL
         MENUITEM "Connect to &remote...",             IDM_CONNECT
+        MENUITEM "&Reconnect to same session",        IDM_RECONNECT
         MENUITEM SEPARATOR
         MENUITEM "&Detach (keep session)",            IDM_DISCONNECT
         MENUITEM "&Close session (terminate)",        IDM_CLOSE_SESSION

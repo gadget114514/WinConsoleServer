@@ -74,6 +74,10 @@ public:
         const std::vector<std::pair<std::wstring,std::wstring>>& extraEnv = {});
 
     bool IsStarted() const { return io_ && io_->IsRunning(); }
+    // Server-side job id of the remote session (0 when unknown).
+    uint32_t RemoteJobId() const { return io_ ? io_->JobId() : 0; }
+    // Clears the screen and scrollback before replaying a reattached session.
+    void ResetForReconnect();
     HWND Hwnd()      const { return hwnd_; }
     int  Columns()   const { return buffer_.columns(); }
     int  Rows()      const { return buffer_.rows(); }

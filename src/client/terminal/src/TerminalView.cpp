@@ -149,6 +149,12 @@ void TerminalView::SetIo(std::unique_ptr<ITerminalIo> io) {
     io_ = std::move(io);
 }
 
+void TerminalView::ResetForReconnect() {
+    buffer_.clearAll();
+    emulator_.reset(&buffer_);
+    if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
 bool TerminalView::StartSession(const TerminalStartOptions& opt, std::wstring* error) {
     if (io_ && io_->IsRunning()) return true;
     if (!io_) io_ = std::make_unique<LocalSession>();

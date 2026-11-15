@@ -315,6 +315,8 @@ int main(int argc, char** argv) {
         server.Stop();
         return 1;
     }
+    Check(session1.JobId() == static_cast<uint32_t>(sessionId),
+          "HELLO_ACK reports the spawned job id");
 
     Sleep(500);
     const char greeting[] = "echo hello-wcsp\r";
@@ -326,6 +328,8 @@ int main(int argc, char** argv) {
     session2.SetOutputSink([&](const char* data, size_t len) { out2.Sink(data, len); });
     const TerminalStartOptions attachOpt = AttachOptions(static_cast<uint32_t>(sessionId));
     Check(session2.Start(attachOpt, &error), "a second client attaches to the same job");
+    Check(session2.JobId() == static_cast<uint32_t>(sessionId),
+          "HELLO_ACK reports the attached job id");
 
     const char second[] = "echo second-session\r";
     session2.Write(second, sizeof(second) - 1);
@@ -349,6 +353,8 @@ int main(int argc, char** argv) {
     RemoteSession session3(cfg);
     session3.SetOutputSink([&](const char* data, size_t len) { out3.Sink(data, len); });
     Check(session3.Start(attachOpt, &error), "retained session can be reattached");
+    Check(session3.JobId() == static_cast<uint32_t>(sessionId),
+          "HELLO_ACK reports the reattached job id");
     Check(out3.WaitFor("after-second", 10000), "reattach replays prior output");
     session3.TerminateSession();
     Sleep(700);
@@ -364,6 +370,8 @@ int main(int argc, char** argv) {
     const int sizeJobId = WaitForNewestSession(cfg, "wcsp-cmd", 5000);
     Check(sizeJobId > 0, "size-sync host session is listed");
     if (sizeJobId > 0) {
+        Check(sizeHost.JobId() == static_cast<uint32_t>(sizeJobId),
+              "HELLO_ACK reports the size-sync host job id");
         sizeHost.Close();
         Sleep(500);
 

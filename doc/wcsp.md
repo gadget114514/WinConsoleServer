@@ -82,6 +82,7 @@ Strings are UTF-8 without a NUL terminator. `ENV` may appear more than once. Unk
 | `CLIENT_ID` | `0x0008` | UTF-8 client identifier; optional, not used by the server. |
 | `SESSION_ID` | `0x0009` | `uint32`; server-assigned connection/session id in `HELLO_ACK`. |
 | `ENCODING` | `0x000A` | UTF-8 encoding name; `HELLO_ACK` sends `UTF-8`. |
+| `JOB_ID` | `0x000B` | `uint32`; server-side ConPTY job id in `HELLO_ACK` (omitted when 0). Clients reattach with `SHELL=attach:<id>` to resume the same session after a dropped connection. |
 
 ## 4. Frame types
 
@@ -116,7 +117,7 @@ Strings are UTF-8 without a NUL terminator. `ENV` may appear more than once. Unk
 | :--- | :--- | :--- |
 | `MAGIC` | yes | `WCSP`. |
 | `VERSION` | yes | Must be `1.x`; the server rejects a different major version. |
-| `NAME` | no | Display name (for example `WinConsoleTerminal/0.5.0`). |
+| `NAME` | no | Display name (for example `WinConsoleTerminal/0.6.0`). |
 | `FEATURES` | no | Requested features. Missing means `0`. |
 | `SIZE` | yes | Requested `cols` × `rows`. |
 | `SHELL` | yes | `cmd`, `powershell`, `bash`, `attach:<id>`, `list` (control session), or `delete:<id>` (delete a retained session). |
@@ -135,6 +136,7 @@ The server replies with `HELLO_ACK` after validating the request, resizing the t
 | `FEATURES` | Negotiated features: `hello.features & server_supported_features`. |
 | `SIZE` | Accepted `cols` × `rows` after clamping. |
 | `SESSION_ID` | Connection id, unique per server process starting at 1. |
+| `JOB_ID` | Server-side ConPTY job id. Omitted when 0 (for example, a control session). Pass it back as `attach:<id>` to reconnect to the same retained session. |
 | `SHELL` | Resolved display name (`cmd`, `powershell`, `bash`, or the attached job name). |
 | `ENCODING` | Always `UTF-8`. |
 

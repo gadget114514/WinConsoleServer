@@ -49,6 +49,7 @@ void TestHelloAckRoundTrip() {
     ack.cols = 160;
     ack.rows = 50;
     ack.session_id = 42;
+    ack.job_id = 7;
     ack.shell = "cmd";
     ack.features = wcs::FeatureResize;
 
@@ -59,6 +60,7 @@ void TestHelloAckRoundTrip() {
     CHECK(out.cols == ack.cols);
     CHECK(out.rows == ack.rows);
     CHECK(out.session_id == ack.session_id);
+    CHECK(out.job_id == ack.job_id);
     CHECK(out.shell == ack.shell);
     CHECK(out.features == ack.features);
 }

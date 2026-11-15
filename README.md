@@ -142,7 +142,7 @@ bin\Release\
   tests\term_server_smoke.exe
 
 dist\
-  WinConsoleServerSetup-0.5.0.exe
+  WinConsoleServerSetup-0.6.0.exe
 ```
 
 ## 使い方
@@ -197,8 +197,13 @@ dist\
 - **Attach to session...**: 保持中のセッション一覧から選択して再接続
 - **Attach to all running sessions**: 実行中の保持セッションを別ウィンドウでまとめて開く
 - **Connect to remote...**: ホスト / ポート / トークンを指定して接続
+- **Reconnect to same session**: `JOB_ID` を使って同じ保持セッションへ再接続
 - **Detach (keep session)**: 切断だけ行い、サーバ側ジョブを保持
 - **Close session (terminate)**: `CLOSE` を送り、サーバ側ジョブを終了
+
+接続が切れた場合、`WinConsoleTerminal` はサーバから通知された `JOB_ID` を使って
+同じセッションへ自動再接続します（バックオフ付き）。無効化するには
+`%APPDATA%\WinConsoleTerminal.ini` の `[connection] auto_reconnect=0` を設定します。
 
 ### 3. CUI クライアント `wct`
 
@@ -288,13 +293,13 @@ sc.exe stop WinConsoleServer
 ### 6. インストーラ
 
 ```powershell
-.\dist\WinConsoleServerSetup-0.5.0.exe
+.\dist\WinConsoleServerSetup-0.6.0.exe
 ```
 
 サイレントインストール:
 
 ```powershell
-.\dist\WinConsoleServerSetup-0.5.0.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+.\dist\WinConsoleServerSetup-0.6.0.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 ```
 
 インストーラは任意で Windows ファイアウォールの TCP 7000 許可ルールを追加します。

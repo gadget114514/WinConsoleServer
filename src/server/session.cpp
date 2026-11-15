@@ -563,6 +563,7 @@ void Session::Run() {
     ack.cols = cols;
     ack.rows = rows;
     ack.session_id = id_;
+    ack.job_id = static_cast<uint32_t>(job_id_.load());
     ack.shell = displayName;
     wcs::Frame ackFrame;
     ackFrame.type = wcs::FrameType::HelloAck;

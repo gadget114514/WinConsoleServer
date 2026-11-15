@@ -21,7 +21,9 @@
 #include <cwchar>
 #include <memory>
 #include <mutex>
+#include <cstdint>
 #include <string>
+#include <thread>
 #include <vector>
 
 #pragma comment(lib, "comctl32.lib")
@@ -35,6 +37,19 @@ constexpr UINT WM_APP_AUTOCONNECT = WM_APP + 1;
 constexpr UINT WM_APP_ERROR       = WM_APP + 2;
 constexpr UINT WM_APP_EXIT        = WM_APP + 3;
 constexpr UINT WM_APP_RESIZED     = WM_APP + 4;
+constexpr UINT WM_APP_AUTO_RECONNECT = WM_APP + 5;
+constexpr UINT WM_APP_AUTO_RECONNECT_FAILED = WM_APP + 6;
+
+constexpr UINT_PTR kConnectionTimerId = 1;
+
+enum class ConnectionState {
+    Idle,
+    Connecting,
+    Connected,
+    Reconnecting,
+    Failed,
+    Exited,
+};
 
 struct AppState {
     HWND hwnd = nullptr;
@@ -48,6 +63,18 @@ struct AppState {
     std::wstring shell = L"cmd";
     std::wstring token;
     bool auto_connect = false;
+
+    // Same-session reconnection (WCSP JOB_ID + attach:<id>). The server keeps
+    // a detached ConPTY job alive, so a dropped connection can resume it.
+    uint32_t server_job_id = 0;
+    bool auto_reconnect = true;
+    bool closing = false;
+    bool reconnect_in_flight = false;
+    int reconnect_attempts = 0;
+    uint64_t next_reconnect_tick_ms = 0;
+    std::wstring last_error;
+    std::wstring active_target;
+    ConnectionState state = ConnectionState::Idle;
 };
 
 AppState g;
@@ -95,6 +122,8 @@ void LoadSettings() {
     g.shell = buf;
     GetPrivateProfileStringW(L"connection", L"token", L"", buf, 512, ini.c_str());
     g.token = buf;
+    g.auto_reconnect =
+        GetPrivateProfileIntW(L"connection", L"auto_reconnect", 1, ini.c_str()) != 0;
 }
 
 void SaveSettings() {
@@ -104,6 +133,8 @@ void SaveSettings() {
                                std::to_wstring(g.port).c_str(), ini.c_str());
     WritePrivateProfileStringW(L"connection", L"shell", g.shell.c_str(), ini.c_str());
     WritePrivateProfileStringW(L"connection", L"token", g.token.c_str(), ini.c_str());
+    WritePrivateProfileStringW(L"connection", L"auto_reconnect",
+                               g.auto_reconnect ? L"1" : L"0", ini.c_str());
 }
 
 void SetStatus(const std::wstring& text, int part = 0) {
@@ -138,28 +169,88 @@ void Layout() {
     }
 }
 
-void Disconnect() {
+void UpdateStatus() {
+    if (!g.status) return;
+    std::wstring state_text;
+    switch (g.state) {
+    case ConnectionState::Idle:       state_text = L"disconnected"; break;
+    case ConnectionState::Connecting: state_text = L"connecting..."; break;
+    case ConnectionState::Connected:  state_text = L"connected"; break;
+    case ConnectionState::Reconnecting:
+        state_text = L"reconnecting...";
+        break;
+    case ConnectionState::Failed:
+        state_text = g.last_error.empty() ? L"connection lost"
+                                          : L"connection lost - " + g.last_error;
+        break;
+    case ConnectionState::Exited:
+        state_text = L"process exited";
+        break;
+    }
+    SetStatus(state_text, 0);
+    SetStatus(g.host + L":" + std::to_wstring(g.port), 1);
+
+    std::wstring target = g.active_target.empty() ? g.shell : g.active_target;
+    if (g.server_job_id > 0) {
+        target += L"  #" + std::to_wstring(g.server_job_id);
+    }
+    SetStatus(target, 2);
+
+    if (g.view) {
+        SetStatus(std::to_wstring(g.view->Columns()) + L" x " +
+                  std::to_wstring(g.view->Rows()), 3);
+    }
+}
+
+void CloseCurrentSession() {
     if (g.session) {
         g.session->Close();
         g.session = nullptr;
     }
-    SetStatus(L"disconnected", 0);
 }
 
-bool StartConnection(const std::wstring& host, int port,
-                     const std::wstring& shell, const std::wstring& token) {
-    if (host.empty()) {
-        MessageBoxW(g.hwnd, L"Host is empty.", L"Connect", MB_ICONWARNING);
-        return false;
+void CancelScheduledReconnect() {
+    g.reconnect_in_flight = false;
+    g.next_reconnect_tick_ms = 0;
+}
+
+uint64_t ReconnectBackoffMs(int attempts) {
+    uint64_t delay = 1000;
+    for (int i = 0; i < attempts && delay < 30000; ++i) {
+        delay *= 2;
+        if (delay > 30000) delay = 30000;
     }
+    return delay;
+}
 
-    Disconnect();
+void ScheduleAutoReconnect(const std::wstring& detail, int attempts) {
+    g.last_error = detail;
+    g.reconnect_in_flight = false;
+    g.reconnect_attempts = attempts;
+    if (g.auto_reconnect && g.server_job_id > 0 && !g.closing) {
+        g.state = ConnectionState::Reconnecting;
+        g.next_reconnect_tick_ms = GetTickCount64() + ReconnectBackoffMs(attempts);
+    } else {
+        g.state = ConnectionState::Failed;
+        g.next_reconnect_tick_ms = 0;
+    }
+    UpdateStatus();
+}
 
+void Disconnect() {
+    CancelScheduledReconnect();
+    CloseCurrentSession();
+    g.state = ConnectionState::Idle;
+    UpdateStatus();
+}
+
+bool OpenTarget(const std::wstring& target, bool show_error,
+                std::wstring* out_error) {
     RemoteConfig config;
-    config.host = WideToUtf8Client(host);
-    config.port = (uint16_t)port;
-    config.shell = WideToUtf8Client(shell);
-    config.token = WideToUtf8Client(token);
+    config.host = WideToUtf8Client(g.host);
+    config.port = (uint16_t)g.port;
+    config.shell = WideToUtf8Client(target);
+    config.token = WideToUtf8Client(g.token);
 
     auto* session = new RemoteSession(config);
     session->onExit = [hwnd = g.hwnd](const wcs::ExitInfo& info) {
@@ -177,7 +268,7 @@ bool StartConnection(const std::wstring& host, int port,
     g.view->SetIo(std::unique_ptr<ITerminalIo>(session));
 
     TerminalStartOptions opt;
-    opt.shell = shell;
+    opt.shell = target;
     opt.cols = 0;
     opt.rows = 0;
     opt.codePage = CP_UTF8;
@@ -185,18 +276,170 @@ bool StartConnection(const std::wstring& host, int port,
     std::wstring error;
     if (!g.view->StartSession(opt, &error)) {
         g.session = nullptr;
-        SetStatus(L"connect failed", 0);
-        MessageBoxW(g.hwnd, error.empty() ? L"Connection failed." : error.c_str(),
-                    L"Connect", MB_ICONERROR);
+        if (error.empty()) error = L"Connection failed.";
+        if (out_error) *out_error = error;
+        if (show_error) {
+            MessageBoxW(g.hwnd, error.c_str(), L"Connect", MB_ICONERROR);
+        }
         return false;
     }
 
-    SetStatus(L"connected", 0);
-    SetStatus(host + L":" + std::to_wstring(port), 1);
-    SetStatus(shell, 2);
-    SetStatus(std::to_wstring(g.view->Columns()) + L" x " +
-              std::to_wstring(g.view->Rows()), 3);
+    g.active_target = target;
+    g.server_job_id = static_cast<uint32_t>(session->JobId());
+    if (g.server_job_id == 0 && target.rfind(L"attach:", 0) == 0) {
+        g.server_job_id =
+            static_cast<uint32_t>(std::wcstoul(target.c_str() + 7, nullptr, 10));
+    }
+    g.reconnect_attempts = 0;
+    g.reconnect_in_flight = false;
+    g.next_reconnect_tick_ms = 0;
+    g.last_error.clear();
     return true;
+}
+
+bool StartConnection(const std::wstring& host, int port,
+                     const std::wstring& shell, const std::wstring& token) {
+    if (host.empty()) {
+        MessageBoxW(g.hwnd, L"Host is empty.", L"Connect", MB_ICONWARNING);
+        return false;
+    }
+
+    Disconnect();
+    g.server_job_id = 0;
+    g.active_target.clear();
+    g.reconnect_attempts = 0;
+    g.last_error.clear();
+    g.state = ConnectionState::Connecting;
+    UpdateStatus();
+
+    std::wstring error;
+    if (!OpenTarget(shell, true, &error)) {
+        g.state = ConnectionState::Failed;
+        g.last_error = error;
+        UpdateStatus();
+        return false;
+    }
+
+    g.state = ConnectionState::Connected;
+    UpdateStatus();
+    return true;
+}
+
+bool TryReconnect(bool auto_mode) {
+    if (!g.hwnd) return false;
+
+    const uint32_t job_id = g.server_job_id;
+    std::wstring fallback_target = g.active_target;
+    if (fallback_target.empty() || fallback_target.rfind(L"attach:", 0) == 0) {
+        fallback_target = g.shell;
+    }
+    std::wstring attach_target;
+    if (job_id > 0) {
+        attach_target = L"attach:" + std::to_wstring(job_id);
+    }
+
+    CancelScheduledReconnect();
+    CloseCurrentSession();
+    g.view->ResetForReconnect();
+    g.state = ConnectionState::Connecting;
+    UpdateStatus();
+
+    std::wstring error;
+    bool ok = false;
+    if (!attach_target.empty()) {
+        ok = OpenTarget(attach_target, false, &error);
+    }
+    if (!ok && !auto_mode && !fallback_target.empty() &&
+        fallback_target != attach_target) {
+        error.clear();
+        ok = OpenTarget(fallback_target, false, &error);
+    }
+
+    if (!ok) {
+        if (error.empty()) error = L"Reconnect failed.";
+        ScheduleAutoReconnect(error, g.reconnect_attempts + 1);
+        if (!auto_mode) {
+            MessageBoxW(g.hwnd, error.c_str(), L"Reconnect", MB_ICONERROR);
+        }
+        return false;
+    }
+
+    g.state = ConnectionState::Connected;
+    g.reconnect_attempts = 0;
+    g.reconnect_in_flight = false;
+    g.next_reconnect_tick_ms = 0;
+    g.last_error.clear();
+    UpdateStatus();
+    return true;
+}
+
+bool ProbeServerReachable(const std::wstring& host, int port, int timeout_ms) {
+    if (port <= 0) return false;
+    WSADATA wsa{};
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return false;
+
+    addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    addrinfo* result = nullptr;
+    const std::string host_utf8 = WideToUtf8Client(host.empty() ? L"127.0.0.1" : host);
+    const std::string port_text = std::to_string(port);
+    bool reachable = false;
+    if (getaddrinfo(host_utf8.c_str(), port_text.c_str(), &hints, &result) == 0) {
+        for (addrinfo* ai = result; ai && !reachable; ai = ai->ai_next) {
+            SOCKET s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+            if (s == INVALID_SOCKET) continue;
+
+            u_long nonblocking = 1;
+            ioctlsocket(s, FIONBIO, &nonblocking);
+            int rc = connect(s, ai->ai_addr, static_cast<int>(ai->ai_addrlen));
+            if (rc == 0) {
+                reachable = true;
+            } else if (WSAGetLastError() == WSAEWOULDBLOCK) {
+                fd_set writefds;
+                FD_ZERO(&writefds);
+                FD_SET(s, &writefds);
+                timeval tv{};
+                tv.tv_sec = timeout_ms / 1000;
+                tv.tv_usec = (timeout_ms % 1000) * 1000;
+                if (select(0, nullptr, &writefds, nullptr, &tv) > 0) {
+                    int socket_error = 0;
+                    int length = sizeof(socket_error);
+                    if (getsockopt(s, SOL_SOCKET, SO_ERROR,
+                                   reinterpret_cast<char*>(&socket_error),
+                                   &length) == 0 &&
+                        socket_error == 0) {
+                        reachable = true;
+                    }
+                }
+            }
+            closesocket(s);
+        }
+        freeaddrinfo(result);
+    }
+    WSACleanup();
+    return reachable;
+}
+
+void StartAutoReconnectProbe(HWND hwnd, std::wstring host, int port) {
+    std::thread([hwnd, host = std::move(host), port]() {
+        const bool reachable = ProbeServerReachable(host, port, 800);
+        PostMessageW(hwnd, reachable ? WM_APP_AUTO_RECONNECT
+                                     : WM_APP_AUTO_RECONNECT_FAILED,
+                     0, 0);
+    }).detach();
+}
+
+void RunAutoReconnect(HWND hwnd) {
+    if (g.state != ConnectionState::Reconnecting) return;
+    if (g.reconnect_in_flight) return;
+    if (g.server_job_id == 0) return;
+    const uint64_t now = GetTickCount64();
+    if (now < g.next_reconnect_tick_ms) return;
+    g.reconnect_in_flight = true;
+    StartAutoReconnectProbe(hwnd, g.host, g.port);
 }
 
 INT_PTR CALLBACK ConnectProc(HWND dlg, UINT msg, WPARAM wp, LPARAM) {
@@ -534,6 +777,10 @@ void CloseSession() {
     }
     g.session->TerminateSession();
     g.session = nullptr;
+    g.server_job_id = 0;
+    CancelScheduledReconnect();
+    g.state = ConnectionState::Idle;
+    UpdateStatus();
     SetStatus(L"session closed", 0);
 }
 
@@ -556,6 +803,7 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                    GetModuleHandleW(nullptr), nullptr);
         SetStatus(L"ready", 0);
         Layout();
+        SetTimer(hwnd, kConnectionTimerId, 500, nullptr);
 
         PostMessageW(hwnd, WM_APP_AUTOCONNECT, 0, 0);
         return 0;
@@ -598,6 +846,9 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case IDM_CONNECT:
             ShowConnectDialog();
             return 0;
+        case IDM_RECONNECT:
+            TryReconnect(false);
+            return 0;
         case IDM_DISCONNECT:
             Disconnect();
             SetStatus(L"detached (session kept)", 0);
@@ -634,18 +885,38 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
 
     case WM_APP_ERROR: {
+        if (g.closing) return 0;
         std::wstring error = g.session ? g.session->LastError() : L"connection lost";
-        Disconnect();
-        SetStatus(error.empty() ? L"connection lost" : error, 0);
+        if (error.empty()) error = L"connection lost";
+        CloseCurrentSession();
+        ScheduleAutoReconnect(error, 0);
         return 0;
     }
 
+    case WM_APP_AUTO_RECONNECT:
+        if (g.state == ConnectionState::Reconnecting) {
+            TryReconnect(true);
+        }
+        return 0;
+
+    case WM_APP_AUTO_RECONNECT_FAILED:
+        if (g.state == ConnectionState::Reconnecting) {
+            g.reconnect_in_flight = false;
+            ++g.reconnect_attempts;
+            g.next_reconnect_tick_ms =
+                GetTickCount64() + ReconnectBackoffMs(g.reconnect_attempts);
+            UpdateStatus();
+        }
+        return 0;
+
     case WM_APP_EXIT: {
         const int code = (int)wp;
-        if (g.session) {
-            g.session->Close();
-            g.session = nullptr;
-        }
+        CloseCurrentSession();
+        CancelScheduledReconnect();
+        g.server_job_id = 0;
+        g.last_error.clear();
+        g.state = ConnectionState::Exited;
+        UpdateStatus();
         SetStatus(L"process exited (code " + std::to_wstring(code) + L")", 0);
         return 0;
     }
@@ -657,7 +928,15 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
 
+    case WM_TIMER:
+        if (wp == kConnectionTimerId) {
+            RunAutoReconnect(hwnd);
+        }
+        return 0;
+
     case WM_CLOSE:
+        g.closing = true;
+        KillTimer(hwnd, kConnectionTimerId);
         if (g.session) {
             const int choice = MessageBoxW(
                 hwnd,
@@ -666,7 +945,11 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 L"No: detach and keep it running for a later attach.\n"
                 L"Cancel: keep the window open.",
                 L"WinConsoleTerminal", MB_YESNOCANCEL | MB_ICONQUESTION);
-            if (choice == IDCANCEL) return 0;
+            if (choice == IDCANCEL) {
+                g.closing = false;
+                SetTimer(hwnd, kConnectionTimerId, 500, nullptr);
+                return 0;
+            }
             if (choice == IDYES) {
                 g.session->TerminateSession();
             } else {
@@ -678,6 +961,7 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
 
     case WM_DESTROY:
+        KillTimer(hwnd, kConnectionTimerId);
         if (g.view) {
             delete g.view;
             g.view = nullptr;
