@@ -16,6 +16,7 @@
 #define IDM_NEW_BASH        40009
 #define IDM_ATTACH          40010
 #define IDM_CLOSE_SESSION   40011
+#define IDM_ATTACH_ALL      40012
 
 #define IDC_HOST            1001
 #define IDC_PORT            1002

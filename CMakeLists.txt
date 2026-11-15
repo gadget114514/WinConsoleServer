@@ -188,8 +188,27 @@ add_executable(test_frame_reader tests/test_frame_reader.cpp)
 target_link_libraries(test_frame_reader PRIVATE wcs_protocol)
 add_test(NAME frame_reader COMMAND test_frame_reader)
 
-set_target_properties(test_protocol test_frame_reader PROPERTIES
-  RUNTIME_OUTPUT_DIRECTORY "${OUTPUT_DIR}/$<CONFIG>/tests"
+# End-to-end wct test: runs wct inside a local ConPTY against a fake WCSP server.
+add_executable(wct_smoke tests/wct_smoke.cpp)
+target_link_libraries(wct_smoke PRIVATE wcs_protocol ws2_32)
+add_dependencies(wct_smoke wct)
+add_test(NAME wct_smoke COMMAND wct_smoke --wct $<TARGET_FILE:wct>)
+
+# End-to-end server test: spawns WinConsoleServer, attaches clients, and checks
+# retained sessions plus FeatureSizeSync peer notifications.
+add_executable(term_server_smoke
+  tests/term_server_smoke.cpp
+  src/client/remote_session.cpp
+)
+target_include_directories(term_server_smoke PRIVATE src/client src/common)
+target_link_libraries(term_server_smoke PRIVATE wcs_protocol ws2_32)
+add_dependencies(term_server_smoke WinConsoleServer)
+add_test(NAME term_server_smoke
+         COMMAND term_server_smoke --server $<TARGET_FILE:WinConsoleServer>)
+
+set_target_properties(
+  test_protocol test_frame_reader wct_smoke term_server_smoke
+  PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${OUTPUT_DIR}/$<CONFIG>/tests"
 )
 
 # ---------------------------------------------------------------------------

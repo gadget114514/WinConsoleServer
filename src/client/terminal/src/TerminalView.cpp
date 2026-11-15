@@ -277,6 +277,20 @@ LRESULT TerminalView::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CREATE:       return OnCreate(hwnd);
     case WM_DESTROY:      OnDestroy(); return 0;
     case WM_SIZE:         OnSize(LOWORD(lp), HIWORD(lp)); return 0;
+    case WM_DPICHANGED:
+    case WM_DPICHANGED_AFTERPARENT: {
+        // WM_DPICHANGED carries the new DPI in the high word; for
+        // WM_DPICHANGED_AFTERPARENT (child windows) query the window.
+        const UINT dpi = (msg == WM_DPICHANGED) ? HIWORD(wp) : 0;
+        UpdateDpiScale(dpi);
+        InitTextFormats();
+        UpdateMetrics();
+        ReleaseRenderTarget();
+        RECT rc; GetClientRect(hwnd, &rc);
+        OnSize(rc.right - rc.left, rc.bottom - rc.top);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
     case WM_PAINT:        OnPaint(); return 0;
     case WM_ERASEBKGND:   return 1; // handled in OnPaint
     case WM_KEYDOWN:      OnKeyDown(wp, lp); return 0;
@@ -561,6 +575,9 @@ LRESULT TerminalView::OnCreate(HWND hwnd) {
                         __uuidof(IDWriteFactory),
                         reinterpret_cast<IUnknown**>(&dwFactory_));
 
+    // Direct2D runs at a fixed 96 DPI so DIPs equal physical pixels. Font sizes
+    // and small offsets are scaled by dpiScale_ instead.
+    UpdateDpiScale();
     InitTextFormats();
 
     // ---------------------------------------------------------------------------
@@ -679,7 +696,7 @@ void TerminalView::OnSize(int w, int h) {
 
 bool TerminalView::GridSizeFor(int w, int h, int& cols, int& rows) const {
     if (w <= 0 || h <= 0 || cellWidth_ <= 0 || cellHeight_ <= 0) return false;
-    const float usableW = (std::max)(0.0f, (float)w - (float)kScrollBarWidth);
+    const float usableW = (std::max)(0.0f, (float)w - ScrollBarWidth());
     cols = (std::max)(2, (int)(usableW / cellWidth_));
     rows = (std::max)(1, (int)((float)h / cellHeight_));
     return true;
@@ -893,8 +910,13 @@ bool TerminalView::EnsureRenderTarget() {
 
     RECT rc; GetClientRect(hwnd_, &rc);
     D2D1_SIZE_U size = D2D1::SizeU(rc.right - rc.left, rc.bottom - rc.top);
+    // Fixed 96 DPI: Direct2D units are physical pixels (the window is already
+    // per-monitor DPI aware), which keeps all cell/pixel math consistent.
     HRESULT hr = d2dFactory_->CreateHwndRenderTarget(
-        D2D1::RenderTargetProperties(),
+        D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1::PixelFormat(),
+            96.0f, 96.0f),
         D2D1::HwndRenderTargetProperties(hwnd_, size),
         &renderTarget_);
     if (SUCCEEDED(hr) && renderTarget_) {
@@ -945,6 +967,29 @@ ID2D1SolidColorBrush* TerminalView::GetBrush(const TermColor& c, float alpha) {
 }
 
 // ---------------------------------------------------------------------------
+// UpdateDpiScale — derive the physical-pixel/DIP ratio for this window
+// ---------------------------------------------------------------------------
+void TerminalView::UpdateDpiScale(UINT dpi) {
+    if (dpi == 0) {
+        using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+        HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        auto getDpi = user32
+            ? reinterpret_cast<GetDpiForWindowFn>(
+                  GetProcAddress(user32, "GetDpiForWindow"))
+            : nullptr;
+        if (getDpi && hwnd_) {
+            dpi = getDpi(hwnd_);
+        } else if (HDC hdc = GetDC(hwnd_)) {
+            const int systemDpi = GetDeviceCaps(hdc, LOGPIXELSX);
+            ReleaseDC(hwnd_, hdc);
+            if (systemDpi > 0) dpi = (UINT)systemDpi;
+        }
+    }
+    dpiScale_ = dpi > 0 ? (float)dpi / 96.0f : 1.0f;
+    if (dpiScale_ <= 0.0f) dpiScale_ = 1.0f;
+}
+
+// ---------------------------------------------------------------------------
 // Text formats (regular / bold / italic / bold+italic)
 // ---------------------------------------------------------------------------
 void TerminalView::InitTextFormats() {
@@ -962,7 +1007,7 @@ void TerminalView::InitTextFormats() {
         { &textFormatBoldItalic_, DWRITE_FONT_WEIGHT_BOLD,    DWRITE_FONT_STYLE_ITALIC },
     };
 
-    const float size = 11.0f * 96.0f / 72.0f;   // pt → dip
+    const float size = 11.0f * 96.0f / 72.0f * dpiScale_;   // pt → px at 96 DPI
     for (auto& spec : specs) {
         if (*spec.out) { (*spec.out)->Release(); *spec.out = nullptr; }
 
@@ -1173,7 +1218,7 @@ void TerminalView::OnPaint() {
     const int curRow = buffer_.cursorRow() + histLines;  // logical row of cursor
 
     // Clip rendering to exclude scroll bar area
-    const float clipRight = (float)(clientRc.right - clientRc.left) - kScrollBarWidth;
+    const float clipRight = (float)(clientRc.right - clientRc.left) - ScrollBarWidth();
     rt->PushAxisAlignedClip(D2D1::RectF(0, 0, clipRight, (float)(clientRc.bottom - clientRc.top)),
                             D2D1_ANTIALIAS_MODE_ALIASED);
 
@@ -1259,22 +1304,23 @@ void TerminalView::OnPaint() {
             for (size_t ci = 0; ci < imeComposition_.size(); ++ci) {
                 int cw = ImeCellWidth(std::wstring(1, imeComposition_[ci]));
                 float ux = cx + (float)cellPos * cellW;
-                float uy = cy + cellHeight_ - 1.5f;
+                float uy = cy + cellHeight_ - ScalePx(1.5f);
                 float uw = (float)cw * cellW;
                 BYTE attr = (ci < imeCompAttr_.size()) ? imeCompAttr_[ci] : ATTR_INPUT;
                 if (attr == ATTR_INPUT) {
                     if (auto* b = GetBrush(wavyCol)) {
-                        float amp = 1.5f, step = 2.0f;
+                        const float amp = ScalePx(1.5f), step = ScalePx(2.0f);
+                        const float period = ScalePx(4.0f);
                         for (float wx = 0; wx < uw; wx += step) {
                             float x0 = ux + wx, x1 = ux + (std::min)(wx + step, uw);
-                            float y0 = uy + amp * sinf(wx / 4.0f * 3.14159f);
-                            float y1 = uy + amp * sinf((wx + step) / 4.0f * 3.14159f);
-                            rt->DrawLine(D2D1::Point2F(x0, y0), D2D1::Point2F(x1, y1), b, 1.0f);
+                            float y0 = uy + amp * sinf(wx / period * 3.14159f);
+                            float y1 = uy + amp * sinf((wx + step) / period * 3.14159f);
+                            rt->DrawLine(D2D1::Point2F(x0, y0), D2D1::Point2F(x1, y1), b, ScalePx(1.0f));
                         }
                     }
                 } else {
                     if (auto* b = GetBrush(lineCol))
-                        rt->DrawLine(D2D1::Point2F(ux, uy), D2D1::Point2F(ux + uw, uy), b, 1.0f);
+                        rt->DrawLine(D2D1::Point2F(ux, uy), D2D1::Point2F(ux + uw, uy), b, ScalePx(1.0f));
                 }
                 cellPos += cw;
             }
@@ -1478,35 +1524,37 @@ void TerminalView::DrawCell(ID2D1RenderTarget* rt, int row, int col,
     // Underline (SGR 4:x: single / double / curly / dotted / dashed)
     if (!blinkHidden && cell.underlineStyle != 0) {
         if (auto* b = GetBrush(dc)) {
-            const float uy = y + baseline_ + 1.5f;
+            const float uy = y + baseline_ + ScalePx(1.5f);
+            const float stroke = ScalePx(1.0f);
             switch (cell.underlineStyle) {
             case 2: // double
-                rt->DrawLine({textX, uy},         {textX + w, uy},         b, 1.0f);
-                rt->DrawLine({textX, uy + 2.0f},  {textX + w, uy + 2.0f},  b, 1.0f);
+                rt->DrawLine({textX, uy},                {textX + w, uy},                b, stroke);
+                rt->DrawLine({textX, uy + ScalePx(2.0f)}, {textX + w, uy + ScalePx(2.0f)}, b, stroke);
                 break;
             case 3: { // curly
-                const float amp = 1.5f, step = 2.0f;
+                const float amp = ScalePx(1.5f), step = ScalePx(2.0f);
+                const float period = ScalePx(4.0f);
                 for (float wx = 0; wx < w; wx += step) {
                     const float x0 = textX + wx;
                     const float x1 = textX + (std::min)(wx + step, w);
-                    const float y0 = uy + amp * sinf(wx / 4.0f * 3.14159f);
-                    const float y1 = uy + amp * sinf((wx + step) / 4.0f * 3.14159f);
-                    rt->DrawLine({x0, y0}, {x1, y1}, b, 1.0f);
+                    const float y0 = uy + amp * sinf(wx / period * 3.14159f);
+                    const float y1 = uy + amp * sinf((wx + step) / period * 3.14159f);
+                    rt->DrawLine({x0, y0}, {x1, y1}, b, stroke);
                 }
                 break;
             }
             case 4: // dotted
-                for (float wx = 0; wx < w; wx += 4.0f)
+                for (float wx = 0; wx < w; wx += ScalePx(4.0f))
                     rt->DrawLine({textX + wx, uy},
-                                 {textX + (std::min)(wx + 1.5f, w), uy}, b, 1.0f);
+                                 {textX + (std::min)(wx + ScalePx(1.5f), w), uy}, b, stroke);
                 break;
             case 5: // dashed
-                for (float wx = 0; wx < w; wx += 6.0f)
+                for (float wx = 0; wx < w; wx += ScalePx(6.0f))
                     rt->DrawLine({textX + wx, uy},
-                                 {textX + (std::min)(wx + 3.0f, w), uy}, b, 1.0f);
+                                 {textX + (std::min)(wx + ScalePx(3.0f), w), uy}, b, stroke);
                 break;
             default: // single
-                rt->DrawLine({textX, uy}, {textX + w, uy}, b, 1.0f);
+                rt->DrawLine({textX, uy}, {textX + w, uy}, b, stroke);
                 break;
             }
         }
@@ -1516,7 +1564,7 @@ void TerminalView::DrawCell(ID2D1RenderTarget* rt, int row, int col,
     if (!blinkHidden && cell.strikethrough) {
         if (auto* b = GetBrush(dc)) {
             float sy = y + baseline_ * 0.5f;
-            rt->DrawLine({textX, sy}, {textX + w, sy}, b, 1.0f);
+            rt->DrawLine({textX, sy}, {textX + w, sy}, b, ScalePx(1.0f));
         }
     }
 
@@ -1524,8 +1572,8 @@ void TerminalView::DrawCell(ID2D1RenderTarget* rt, int row, int col,
     if (!blinkHidden && hasHyperlink) {
         TermColor hc = TermColor::fromRgb(50, 140, 230);
         if (auto* b = GetBrush(hc)) {
-            float uy = y + baseline_ + 1.5f;
-            rt->DrawLine({textX, uy}, {textX + w, uy}, b, 1.0f);
+            float uy = y + baseline_ + ScalePx(1.5f);
+            rt->DrawLine({textX, uy}, {textX + w, uy}, b, ScalePx(1.0f));
         }
     }
 
@@ -1534,13 +1582,13 @@ void TerminalView::DrawCell(ID2D1RenderTarget* rt, int row, int col,
         TermColor cursorFg = buffer_.cursorColor().isDefault ? fg : buffer_.cursorColor();
         if (buffer_.cursorShape() == TerminalBuffer::CursorShape::Block) {
             if (auto* b = GetBrush(cursorFg))
-                rt->DrawRectangle(D2D1::RectF(bgX, y, bgX + w, y + h), b, 1.0f);
+                rt->DrawRectangle(D2D1::RectF(bgX, y, bgX + w, y + h), b, ScalePx(1.0f));
         } else if (buffer_.cursorShape() == TerminalBuffer::CursorShape::Underline) {
             if (auto* b = GetBrush(cursorFg))
-                rt->DrawLine({textX, y + h - 2}, {textX + cellWidth_, y + h - 2}, b, 2.0f);
+                rt->DrawLine({textX, y + h - ScalePx(2.0f)}, {textX + cellWidth_, y + h - ScalePx(2.0f)}, b, ScalePx(2.0f));
         } else if (buffer_.cursorShape() == TerminalBuffer::CursorShape::Bar) {
             if (auto* b = GetBrush(cursorFg))
-                rt->DrawLine({textX, y}, {textX, y + h}, b, 2.0f);
+                rt->DrawLine({textX, y}, {textX, y + h}, b, ScalePx(2.0f));
         }
     }
 }
@@ -1873,7 +1921,7 @@ void TerminalView::DrawScrollBar(ID2D1RenderTarget* rt) {
     RECT rc; GetClientRect(hwnd_, &rc);
     const float viewW = (float)(rc.right - rc.left);
     const float viewH = (float)(rc.bottom - rc.top);
-    const float barX = viewW - kScrollBarWidth;
+    const float barX = viewW - ScrollBarWidth();
     const float barYStart = buffer_.hasScrollRegion()
         ? buffer_.scrollTop()    * cellHeight_
         : 0.0f;
@@ -1895,7 +1943,7 @@ void TerminalView::DrawScrollBar(ID2D1RenderTarget* rt) {
     const int regionRows = buffer_.hasScrollRegion()
         ? buffer_.scrollBottom() - buffer_.scrollTop() + 1
         : std::max(1, (int)(viewH / cellHeight_));
-    const float thumbMinH = 16.0f;
+    const float thumbMinH = ScalePx(16.0f);
     const float thumbRatio = (float)regionRows / (float)(histLines + regionRows);
     float thumbH = std::max(thumbMinH, std::min(barH, barH * thumbRatio));
     // Thumb top position: 0 = top of history, (barH - thumbH) = bottom
@@ -1905,7 +1953,8 @@ void TerminalView::DrawScrollBar(ID2D1RenderTarget* rt) {
     TermColor thumbColor;
     thumbColor.r = 180; thumbColor.g = 180; thumbColor.b = 180; thumbColor.isDefault = false;
     if (auto* b = GetBrush(thumbColor, 0.7f))
-        rt->FillRectangle(D2D1::RectF(barX + 1, thumbY, viewW - 1, thumbY + thumbH), b);
+        rt->FillRectangle(D2D1::RectF(barX + ScalePx(1.0f), thumbY,
+                                      viewW - ScalePx(1.0f), thumbY + thumbH), b);
 }
 
 void TerminalView::DrawScrollIndicator(ID2D1RenderTarget* rt, const RECT& clientRc) {
@@ -1929,12 +1978,12 @@ void TerminalView::DrawScrollIndicator(ID2D1RenderTarget* rt, const RECT& client
 
     float textW = (float)wcslen(buf) * cellWidth_ * 0.6f;
     float textH = cellHeight_;
-    float padX = 6.0f;
-    float padY = 2.0f;
-    float x = (float)(clientRc.right - clientRc.left) - kScrollBarWidth - textW - padX * 2 - 4;
+    float padX = ScalePx(6.0f);
+    float padY = ScalePx(2.0f);
+    float x = (float)(clientRc.right - clientRc.left) - ScrollBarWidth() - textW - padX * 2 - ScalePx(4.0f);
     float y = buffer_.hasScrollRegion()
-        ? buffer_.scrollTop() * cellHeight_ + 2.0f
-        : 2.0f;
+        ? buffer_.scrollTop() * cellHeight_ + ScalePx(2.0f)
+        : ScalePx(2.0f);
 
     if (auto* b = GetBrush(bgCol, 0.75f))
         rt->FillRectangle(D2D1::RectF(x, y, x + textW + padX * 2, y + textH + padY * 2), b);

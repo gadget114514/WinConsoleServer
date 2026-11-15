@@ -2,7 +2,7 @@
 ; Inno Setup 6
 
 #define MyAppName "WinConsoleServer"
-#define MyAppVersion "0.4.1"
+#define MyAppVersion "0.5.0"
 #define MyAppPublisher "WinConsoleServer Project"
 #define MyAppURL "https://example.invalid/WinConsoleServer"
 #define MyAppExeName "WinConsoleTerminal.exe"
@@ -49,6 +49,7 @@ Source: "..\third_party\conpty\conpty.dll"; DestDir: "{app}"; Flags: ignoreversi
 Source: "..\third_party\conpty\OpenConsole.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\doc\design.md"; DestDir: "{app}\doc"; Flags: ignoreversion
 Source: "..\doc\wcsp.md"; DestDir: "{app}\doc"; Flags: ignoreversion
+Source: "..\doc\llm-setup.md"; DestDir: "{app}\doc"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Dirs]
@@ -59,6 +60,7 @@ Name: "{group}\WinConsoleTerminal"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\WinConsoleServer (cmd, port 7000)"; Filename: "{app}\WinConsoleServer.exe"; Parameters: "--listen 0.0.0.0:7000 --shell cmd"; WorkingDir: "{app}"
 Name: "{group}\WinConsoleServer (bash, port 7000)"; Filename: "{app}\WinConsoleServer.exe"; Parameters: "--listen 0.0.0.0:7000 --shell bash"; WorkingDir: "{app}"
 Name: "{group}\Design document"; Filename: "{app}\doc\design.md"
+Name: "{group}\LLM setup guide"; Filename: "{app}\doc\llm-setup.md"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\WinConsoleTerminal"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 

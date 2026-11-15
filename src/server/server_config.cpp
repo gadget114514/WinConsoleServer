@@ -1,4 +1,5 @@
 #include "server_config.h"
+#include "../common/version.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -98,6 +99,67 @@ bool IsAllowed(const std::string& name, const ServerConfig& cfg) {
         if (_stricmp(allowed.c_str(), name.c_str()) == 0) return true;
     }
     return false;
+}
+
+void PrintServerHelp() {
+    std::wprintf(
+        L"WinConsoleServer %s - WCSP terminal server\n"
+        L"\n"
+        L"Usage:\n"
+        L"  WinConsoleServer.exe [options]\n"
+        L"  WinConsoleServer.exe help\n"
+        L"\n"
+        L"Default: listen on 0.0.0.0:7000 and start cmd when a client requests it.\n"
+        L"\n"
+        L"Connection options:\n"
+        L"  --listen host:port        Listen address (default 0.0.0.0:7000).\n"
+        L"                            Use 127.0.0.1:7000 to restrict to this host.\n"
+        L"  --shell cmd|powershell|bash\n"
+        L"                            Default shell (default cmd).\n"
+        L"  --cwd path                Working directory for spawned shells.\n"
+        L"  --allow-arbitrary-shell   Allow shells outside cmd/powershell/bash.\n"
+        L"  --max-sessions N          Maximum concurrent sessions (default 8).\n"
+        L"  --history-bytes N         Replay buffer per job, 64 KiB..64 MiB\n"
+        L"                            (default 32 MiB).\n"
+        L"\n"
+        L"Authentication options:\n"
+        L"  --token secret            Shared WCSP token. If omitted, the token\n"
+        L"                            comes from --token-file, WCS_TOKEN, or is\n"
+        L"                            disabled in console mode.\n"
+        L"  --token-file path         Read the token from a file.\n"
+        L"\n"
+        L"Logging options:\n"
+        L"  --log-file path           Append server logs to a file.\n"
+        L"  --verbose, -V             Enable verbose logging.\n"
+        L"\n"
+        L"Windows service options (administrator):\n"
+        L"  --install-service         Install and start the Windows service.\n"
+        L"                            If no token is supplied, one is generated at\n"
+        L"                            %%ProgramData%%\\WinConsoleServer\\token.txt.\n"
+        L"  --uninstall-service       Stop and remove the Windows service.\n"
+        L"  --service-name name       Service name (default WinConsoleServer).\n"
+        L"  --service                 Run under the Service Control Manager.\n"
+        L"                            Do not use this from an interactive shell.\n"
+        L"\n"
+        L"Help:\n"
+        L"  --help, -h, help          Show this help and exit.\n"
+        L"\n"
+        L"Examples:\n"
+        L"  WinConsoleServer.exe --listen 127.0.0.1:7000 --shell cmd\n"
+        L"  WinConsoleServer.exe --listen 0.0.0.0:7000 --shell powershell ^\n"
+        L"      --token-file C:\\ProgramData\\WinConsoleServer\\token.txt\n"
+        L"  WinConsoleServer.exe --install-service --listen 0.0.0.0:7000 ^\n"
+        L"      --shell cmd --history-bytes 33554432\n"
+        L"  WinConsoleServer.exe --uninstall-service\n"
+        L"\n"
+        L"Installed paths:\n"
+        L"  %%ProgramFiles%%\\WinConsoleServer\\WinConsoleServer.exe\n"
+        L"  %%ProgramData%%\\WinConsoleServer\\token.txt\n"
+        L"  %%ProgramData%%\\WinConsoleServer\\server.log\n"
+        L"  <install>\\doc\\llm-setup.md   Non-interactive setup guide for LLM agents\n"
+        L"\n"
+        L"Exit codes: 0 = success/help, 1 = invalid arguments or startup error.\n",
+        WCS_VERSION_W);
 }
 
 } // namespace
@@ -215,22 +277,8 @@ bool ParseServerArgs(int argc, wchar_t** argv, ServerConfig& cfg,
             cfg.allow_arbitrary_shell = true;
         } else if (arg == L"--verbose" || arg == L"-V") {
             cfg.verbose = true;
-        } else if (arg == L"--help" || arg == L"-h") {
-            wprintf(L"Usage: WinConsoleServer.exe [options]\n"
-                    L"  --listen host:port        default 0.0.0.0:7000\n"
-                    L"  --shell cmd|powershell|bash\n"
-                    L"  --cwd path\n"
-                    L"  --token secret\n"
-                    L"  --token-file path          read the token from a file\n"
-                    L"  --max-sessions N\n"
-                    L"  --history-bytes N          replay buffer per job (64 KiB..64 MiB)\n"
-                    L"  --allow-arbitrary-shell\n"
-                    L"  --log-file path            append server logs to a file\n"
-                    L"  --service                  run under the Service Control Manager\n"
-                    L"  --install-service          install as a Windows service (admin)\n"
-                    L"  --uninstall-service        remove the Windows service (admin)\n"
-                    L"  --service-name name        service name (default WinConsoleServer)\n"
-                    L"  --verbose\n");
+        } else if (arg == L"--help" || arg == L"-h" || arg == L"help") {
+            PrintServerHelp();
             return false;
         } else {
             if (error) *error = L"unknown argument: " + arg;

@@ -27,8 +27,75 @@ LAN 上の専用ターミナルから TCP/IP で操作するためのサーバ +
 - 出力は境界付きキュー + バックプレッシャで欠落させない
 - 終了コード、切断、プロトコルエラーを専用フレームで通知
 - Ecode のスクロールバック、選択、コピー/貼り付け、IME、マウス、OSC 8/52/1337、sixel を利用
+- マルチモニタ / 高 DPI 対応（セル寸法と描画オフセットを DPI に追従）
+- 保持中の全セッションをまとめて別ウィンドウで開く **Attach to all running sessions**
 - Native Win32 (Win32 API + Direct2D/DirectWrite)。Qt / .NET / Electron 不使用
 - Inno Setup 6 によるインストーラ
+
+## WCSP と SSH の比較
+
+WCSP は「ConPTY のターミナルを LAN 越しに共有する」ことだけに絞った専用プロトコル、
+SSH は汎用の暗号化リモートシェルです。安全性と汎用性は SSH、
+ターミナル体験（保持・共有・リプレイ）と導入の軽さは WCSP に分があります。
+
+| 観点 | WCSP | SSH |
+|------|------|-----|
+| 暗号化 | なし（平文 TCP） | あり（AES-GCM / ChaCha20-Poly1305 など） |
+| サーバ認証 | なし（ホスト鍵検証がない） | ホスト鍵で検証 |
+| クライアント認証 | 全クライアント共通のトークン 1 個 | 公開鍵 / パスワード / PAM / AD など |
+| 標準化 | 独自仕様（本リポジトリが定義） | RFC 4250〜4254、実装多数 |
+| セッション保持 | 標準機能（デタッチ / `attach:<id>` / 履歴リプレイ） | なし（tmux / screen / mosh が必要） |
+| 複数クライアント同時接続 | 標準機能（サイズ同期あり） | tmux 等のマルチアタッチに依存 |
+| 多重化 | 未実装（`stream_id` 予約） | チャネル多重化あり |
+| ポート転送 / SCP / SFTP | なし | あり |
+| 起動できるプログラム | 許可リストのシェルのみ | ログインシェル、または exec チャネルで任意のプログラム |
+| 実行できるコマンド | 任意（シェル内） | 任意（シェル内 / 単発 exec） |
+| オーバーヘッド | 8 バイトのフレームヘッダのみ | 暗号化・MAC・チャネル管理 |
+| クライアント | 専用クライアントが必要 | OpenSSH がほぼ全環境に存在 |
+| 対応 OS | Windows のみ（ConPTY 依存） | ほぼすべての OS |
+
+### WCSP の Pros
+
+- 依存が少なく、クライアントを配るだけで使える。sshd の構成や鍵配布が不要
+- デタッチ / アタッチと履歴リプレイがプロトコルに組み込まれており、回線が切れても作業が続く
+- 同じジョブへ複数クライアントが同時接続でき、`SIZE_SYNC` で画面サイズを共有できる
+- 生の VT/UTF-8 を無変換で流す。NVT 変換も行単位バッファリングもなく、sixel / OSC 52 などもそのまま通る
+- フレーム境界が明示的で、1 MiB 上限・未知フレーム無視など実装が単純で監査しやすい
+- 起動できるプログラムは許可リストに限られ、任意の実行ファイルを `SHELL` で指定させることはできない
+
+### WCSP の Cons
+
+- 平文。トークンも平文で流れるため、同一 LAN 上の盗聴で即座に乗っ取られる
+- ホスト鍵検証がないので、サーバのなりすまし（MITM）を検出できない
+- 認証は共通トークン 1 個のみ。ユーザー単位の識別・監査・個別失効ができない
+- 多重化・ポート転送・ファイル転送・圧縮がない（1 接続 = 1 セッション）
+- シェルの許可リストは起動するバイナリの制限に過ぎない。`cmd` / `powershell` / `bash` の中では任意のコマンドを実行できるため、権限制限にはならない
+- 標準がなくクライアントは自前。エコシステムも既存ツールも使えない
+- トークンがサービスの `ImagePath` や `%ProgramData%` に平文で残る
+- Windows 専用で、他 OS のサーバやクライアントと相互接続できない
+
+### SSH の Pros
+
+- 暗号化・ホスト鍵検証・ユーザー認証が標準で、WAN 越しでも前提を満たせる
+- ポート転送、SCP/SFTP、agent forwarding、圧縮、多重化まで揃う。
+  WCSP を SSH トンネルに通すという回避策も取れる
+- OpenSSH がほぼすべての OS にあり、Windows 10 1809 以降は sshd も OS 標準の任意機能
+- 実装が広く監査され、ログ・ポリシー・運用手順が既存資産として使える
+
+### SSH の Cons
+
+- セッション保持・複数クライアント共有・切断後の復帰は標準では提供されず、
+  サーバ側に tmux / screen / mosh を足す必要がある
+- Windows で sshd を立てるにはサービス・鍵・ACL・ファイアウォールの設定が必要で、配布も手間
+- 汎用であるぶん設定項目と攻撃面が広い（パスワード認証、転送、agent forwarding など）
+- ConPTY の PTY 挙動や端末機能（sixel など）は sshd のバージョンと構成に左右される
+
+### 使い分け
+
+- 同一ホスト、VM のホスト-ゲスト、信頼できる閉域 LAN で、ターミナルの保持と共有を手軽に使いたい → **WCSP**
+- 暗号化、ユーザー単位の認証・監査、WAN / 社外 / 共有 LAN、ファイル転送のいずれかが必要 → **SSH**
+- WCSP を遠隔から使う場合は SSH や VPN の内側に閉じる。
+  `--listen 127.0.0.1:7000` にして `ssh -L 7000:127.0.0.1:7000` で転送するのが最も単純
 
 ## 動作環境
 
@@ -71,9 +138,11 @@ bin\Release\
   OpenConsole.exe
   tests\test_protocol.exe
   tests\test_frame_reader.exe
+  tests\wct_smoke.exe
+  tests\term_server_smoke.exe
 
 dist\
-  WinConsoleServerSetup-0.4.1.exe
+  WinConsoleServerSetup-0.5.0.exe
 ```
 
 ## 使い方
@@ -111,6 +180,7 @@ dist\
 | `--service-name name` | サービス名 (既定 `WinConsoleServer`) |
 | `--service` | SCM から起動されたときに使用 (通常は直接指定しない) |
 | `--verbose` | 詳細ログ |
+| `--help`, `-h`, `help` | 全オプションと設定例を表示 |
 
 ### 2. ターミナルから接続
 
@@ -125,6 +195,7 @@ dist\
 
 - **New PowerShell / cmd / bash session**: 新しいサーバ側シェルを開始
 - **Attach to session...**: 保持中のセッション一覧から選択して再接続
+- **Attach to all running sessions**: 実行中の保持セッションを別ウィンドウでまとめて開く
 - **Connect to remote...**: ホスト / ポート / トークンを指定して接続
 - **Detach (keep session)**: 切断だけ行い、サーバ側ジョブを保持
 - **Close session (terminate)**: `CLOSE` を送り、サーバ側ジョブを終了
@@ -149,6 +220,7 @@ dist\
 |------|------|
 | `Ctrl+]` | デタッチして終了（サーバ側ジョブは保持） |
 | `Ctrl+]` を 600 ms 以内に 2 回 | `CLOSE` を送ってセッションを終了 |
+| `Ctrl+\` | `CLOSE` を送ってセッションを終了 |
 
 トークンは `--token` または環境変数 `WCS_TOKEN` で指定します。
 
@@ -216,16 +288,31 @@ sc.exe stop WinConsoleServer
 ### 6. インストーラ
 
 ```powershell
-.\dist\WinConsoleServerSetup-0.4.1.exe
+.\dist\WinConsoleServerSetup-0.5.0.exe
 ```
 
 サイレントインストール:
 
 ```powershell
-.\dist\WinConsoleServerSetup-0.4.1.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+.\dist\WinConsoleServerSetup-0.5.0.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 ```
 
 インストーラは任意で Windows ファイアウォールの TCP 7000 許可ルールを追加します。
+
+### 7. LLM / 自動セットアップ
+
+LLM エージェントがインストール後に非対話で設定・検証するための手順を
+[`doc/llm-setup.md`](doc/llm-setup.md) にまとめています。
+インストーラはこの文書を `{app}\doc\llm-setup.md` に配置します。
+
+サーバの全オプションと設定例は次で確認できます。
+
+```powershell
+.\bin\Release\WinConsoleServer.exe --help
+```
+
+サービス設定、トークン生成、ファイアウォール、`wct --list` による疎通確認までの
+コマンド例を記載しています。トークンは秘密情報として扱ってください。
 
 ## プロトコル (WCSP v1.2)
 
@@ -261,6 +348,8 @@ ctest --test-dir build -C Release --output-on-failure
 
 - `test_protocol`: フレーム/TLV/各メッセージ、`SESSION_LIST` のラウンドトリップ
 - `test_frame_reader`: 1 バイトずつの分割受信、複数フレーム、上限超過
+- `wct_smoke`: ConPTY 内の `wct` と偽 WCSP サーバで、エコー / デタッチ / `CLOSE` を確認
+- `term_server_smoke`: `WinConsoleServer` を起動し、生成 / 複数クライアント / 保持 / 再接続 / `SIZE_SYNC` を確認
 
 手動確認:
 
@@ -279,8 +368,10 @@ tput cols; tput lines
 - Windows ファイアウォールで許可元を絞る
 - `--token` を設定する
 - `--allow-arbitrary-shell` は必要な場合のみ有効にする
+- 暗号化やユーザー単位の認証が必要なら SSH を使うか、SSH / VPN の内側に閉じる
 
 TLS、認証方式の拡張、圧縮、多重化はプロトコル上予約されています。
+SSH との機能差と使い分けは [WCSP と SSH の比較](#wcsp-と-ssh-の比較) を参照してください。
 
 ## 既知の制約
 
@@ -299,7 +390,7 @@ src/client/   ターミナル本体、RemoteSession、Ecode ターミナル部�
 third_party/  conpty.dll / OpenConsole.exe、libsixel
 tests/        単体テスト
 installer/    Inno Setup 6 スクリプト
-doc/          設計書
+doc/          設計書、WCSP仕様、LLM向けセットアップガイド
 ```
 
 ## サードパーティ

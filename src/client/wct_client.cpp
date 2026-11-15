@@ -26,15 +26,16 @@
 namespace {
 
 // Ctrl+] once detaches: the socket closes without CLOSE, so the remote ConPTY
-// job stays alive and can be reattached with `wct <id>`. Ctrl+] twice in quick
-// succession ends the session: wct sends WCSP CLOSE, which terminates the
-// remote job.
+// job stays alive and can be reattached with `wct <id>`. Ctrl+\ or Ctrl+] twice
+// in quick succession ends the session: wct sends WCSP CLOSE, which terminates
+// the remote job.
 constexpr uint8_t kDetachKey = 0x1D; // Ctrl+]
+constexpr uint8_t kCloseKey = 0x1C;  // Ctrl+backslash
 constexpr uint64_t kDoublePressMs = 600;
 
 enum class ExitRequest {
     None = 0,
-    Close,   // Ctrl+] twice: terminate the remote session
+    Close,   // Ctrl+\ or Ctrl+] twice: terminate the remote session
     Detach,  // Ctrl+]: keep the remote session
 };
 
@@ -109,22 +110,44 @@ std::string EnvToken() {
 // Puts the console into raw VT input/output mode and restores it on exit.
 struct ConsoleGuard {
     bool active = false;
+    HANDLE opened_in = INVALID_HANDLE_VALUE;
+    HANDLE opened_out = INVALID_HANDLE_VALUE;
 
     bool Setup(std::string& error) {
         g_in = GetStdHandle(STD_INPUT_HANDLE);
         g_out = GetStdHandle(STD_OUTPUT_HANDLE);
+        // A process started inside a ConPTY may inherit pipe handles from its
+        // parent instead of the console handles. Open CONIN$/CONOUT$ in that
+        // case so wct still talks to its attached console.
+        if (!IsValidHandle(g_in) || !GetConsoleMode(g_in, &g_orig_in_mode)) {
+            opened_in = CreateFileW(L"CONIN$", GENERIC_READ | GENERIC_WRITE,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                    OPEN_EXISTING, 0, nullptr);
+            if (IsValidHandle(opened_in)) g_in = opened_in;
+        }
+        if (!IsValidHandle(g_out) || !GetConsoleMode(g_out, &g_orig_out_mode)) {
+            opened_out = CreateFileW(L"CONOUT$", GENERIC_READ | GENERIC_WRITE,
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                     OPEN_EXISTING, 0, nullptr);
+            if (IsValidHandle(opened_out)) g_out = opened_out;
+        }
         if (!IsValidHandle(g_in) || !IsValidHandle(g_out)) {
+            CloseOpenedHandles();
             error = "wct must run inside a console (stdin/stdout are not available)";
             return false;
         }
+        // GetConsoleMode is the reliable console check: ConPTY handles may not
+        // report FILE_TYPE_CHAR even though they are real console handles.
         if (!GetConsoleMode(g_in, &g_orig_in_mode) ||
             !GetConsoleMode(g_out, &g_orig_out_mode)) {
+            CloseOpenedHandles();
             error = "wct must run inside a console (stdin/stdout are redirected)";
             return false;
         }
 
         DWORD outMode = g_orig_out_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
         if (!SetConsoleMode(g_out, outMode)) {
+            CloseOpenedHandles();
             error = "this console does not support VT output";
             return false;
         }
@@ -135,6 +158,7 @@ struct ConsoleGuard {
         inMode |= ENABLE_EXTENDED_FLAGS | ENABLE_VIRTUAL_TERMINAL_INPUT;
         if (!SetConsoleMode(g_in, inMode)) {
             SetConsoleMode(g_out, g_orig_out_mode);
+            CloseOpenedHandles();
             error = "this console does not support VT input "
                     "(Windows 10 1809 or later is required)";
             return false;
@@ -144,12 +168,28 @@ struct ConsoleGuard {
         return true;
     }
 
+    void CloseOpenedHandles() {
+        if (opened_in != INVALID_HANDLE_VALUE) {
+            HANDLE h = opened_in;
+            opened_in = INVALID_HANDLE_VALUE;
+            if (g_in == h) g_in = INVALID_HANDLE_VALUE;
+            CloseHandle(h);
+        }
+        if (opened_out != INVALID_HANDLE_VALUE) {
+            HANDLE h = opened_out;
+            opened_out = INVALID_HANDLE_VALUE;
+            if (g_out == h) g_out = INVALID_HANDLE_VALUE;
+            CloseHandle(h);
+        }
+    }
+
     void Restore() {
         if (!active) return;
         WriteText("\x1b[0m\x1b[?25h\x1b[?1049l");
         SetConsoleMode(g_in, g_orig_in_mode);
         SetConsoleMode(g_out, g_orig_out_mode);
         active = false;
+        CloseOpenedHandles();
     }
 };
 
@@ -273,7 +313,7 @@ int RunWct(const WctOptions& options) {
     }
 
     WriteText("\x1b[0m[wct] " + options.host + ":" + std::to_string(options.port) +
-              " (" + options.target + ") - Ctrl+] detaches, Ctrl+] twice closes\r\n");
+              " (" + options.target + ") - Ctrl+] detaches, Ctrl+\\ or Ctrl+]x2 closes\r\n");
 
     std::thread input([&] {
         std::vector<char> buffer(4096);
@@ -296,7 +336,15 @@ int RunWct(const WctOptions& options) {
             size_t send_start = 0;
             bool close_requested = false;
             for (size_t i = 0; i < read; ++i) {
-                if (static_cast<uint8_t>(begin[i]) != kDetachKey) continue;
+                const uint8_t byte = static_cast<uint8_t>(begin[i]);
+                if (byte == kCloseKey) {
+                    if (i > send_start) remote->Write(begin + send_start, i - send_start);
+                    send_start = i + 1;
+                    g_exit_request = ExitRequest::Close;
+                    close_requested = true;
+                    break;
+                }
+                if (byte != kDetachKey) continue;
 
                 if (i > send_start) remote->Write(begin + send_start, i - send_start);
                 send_start = i + 1;

@@ -42,8 +42,8 @@ USAGE:
 
   Leaving wct with Ctrl+] detaches: the remote ConPTY job keeps running and
   can be reattached with `wct <job-id>`. Pressing Ctrl+] twice in quick
-  succession ends the session (WCSP CLOSE), which terminates the remote job.
-  The session also ends when the remote shell exits.
+  succession or Ctrl+\ ends the session (WCSP CLOSE), which terminates the
+  remote job. The session also ends when the remote shell exits.
 
 OPTIONS:
   --host <host>       Server host (default 127.0.0.1).
@@ -61,6 +61,7 @@ KEYS:
   Ctrl+]              Detach and exit wct; the remote job keeps running.
   Ctrl+] twice        Close the session (terminate the remote job) and exit
                       (the second press must follow within 600 ms).
+  Ctrl+\              Close the session (terminate the remote job) and exit.
 
 EXAMPLES:
   wct                          # new cmd session on 127.0.0.1:7000

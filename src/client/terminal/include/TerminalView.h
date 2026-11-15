@@ -26,6 +26,13 @@
 #include <utility>
 #include <vector>
 
+#ifndef WM_DPICHANGED_AFTERPARENT
+#define WM_DPICHANGED_AFTERPARENT 0x02E3
+#endif
+#ifndef WM_DPICHANGED
+#define WM_DPICHANGED 0x02E0
+#endif
+
 // Posted by the I/O backend when output is queued for the UI thread.
 #define WM_TERMINAL_OUTPUT      (WM_USER + 200)
 #define WM_TERMINAL_OUTPUT_WAKE (WM_USER + 201)
@@ -124,6 +131,9 @@ private:
     void ReleaseBrushes();
     void InitTextFormats();
     void UpdateMetrics();
+    void UpdateDpiScale(UINT dpi = 0);
+    float ScalePx(float value) const { return value * dpiScale_; }
+    float ScrollBarWidth() const { return kScrollBarWidth * dpiScale_; }
     void DrawCell(ID2D1RenderTarget* rt, int row, int col,
                   const TerminalCell& cell, bool isCursor, bool cursorVisible,
                   bool isSelected = false);
@@ -195,7 +205,12 @@ private:
     // colour + alpha → brush cache (brushes live until the render target is recreated)
     std::unordered_map<uint32_t, ID2D1SolidColorBrush*> brushCache_;
 
-    // Cell metrics
+    // Window DPI scale (physical pixels per DIP). The render target is created
+    // at 96 DPI so Direct2D units are physical pixels; text formats and small
+    // drawing offsets are scaled by this factor instead.
+    float dpiScale_ = 1.0f;
+
+    // Cell metrics (physical pixels)
     float cellWidth_  = 8.0f;
     float cellHeight_ = 16.0f;
     float baseline_   = 12.0f;

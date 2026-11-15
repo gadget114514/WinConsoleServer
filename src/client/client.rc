@@ -10,6 +10,7 @@ BEGIN
         MENUITEM "New &bash session",                 IDM_NEW_BASH
         MENUITEM SEPARATOR
         MENUITEM "&Attach to session...",             IDM_ATTACH
+        MENUITEM "Attach to &all running sessions",   IDM_ATTACH_ALL
         MENUITEM "Connect to &remote...",             IDM_CONNECT
         MENUITEM SEPARATOR
         MENUITEM "&Detach (keep session)",            IDM_DISCONNECT

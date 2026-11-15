@@ -116,7 +116,7 @@ Strings are UTF-8 without a NUL terminator. `ENV` may appear more than once. Unk
 | :--- | :--- | :--- |
 | `MAGIC` | yes | `WCSP`. |
 | `VERSION` | yes | Must be `1.x`; the server rejects a different major version. |
-| `NAME` | no | Display name (for example `WinConsoleTerminal/0.4.1`). |
+| `NAME` | no | Display name (for example `WinConsoleTerminal/0.5.0`). |
 | `FEATURES` | no | Requested features. Missing means `0`. |
 | `SIZE` | yes | Requested `cols` × `rows`. |
 | `SHELL` | yes | `cmd`, `powershell`, `bash`, `attach:<id>`, `list` (control session), or `delete:<id>` (delete a retained session). |
@@ -335,7 +335,7 @@ WinConsoleServer's server:
 
 The server implementation is Windows-only. It does not spawn a command shell for `attach:<id>`; it subscribes to the retained job. `WinConsoleTerminal` (`src/client/main.cpp`) and `wct` use `RemoteSession`. Both default to port **7000**.
 
-The server splits an attachment replay into `OUTPUT` frames of at most **256 KiB**, so `--history-bytes` (default 32 MiB) can be replayed without exceeding the 1 MiB frame limit. The server retains jobs after a disconnect; a `CLOSE` frame or `delete:<id>` ends and removes them. The GUI asks **Terminate / Detach / Cancel** when closing the window, and `wct` uses `Ctrl+]` once to detach or twice to send `CLOSE`. `wcs-cli list` / `wcs-cli delete` use `list` and `delete:<id>`. On `RESIZED{PEER}`, `WinConsoleTerminal` keeps its buffer at the peer size and reasserts its own size on the next focus or key input (last-active-client-wins).
+The server splits an attachment replay into `OUTPUT` frames of at most **256 KiB**, so `--history-bytes` (default 32 MiB) can be replayed without exceeding the 1 MiB frame limit. The server retains jobs after a disconnect; a `CLOSE` frame or `delete:<id>` ends and removes them. The GUI asks **Terminate / Detach / Cancel** when closing the window, and `wct` uses `Ctrl+]` once to detach, `Ctrl+]` twice or `Ctrl+\` to send `CLOSE`. `wcs-cli list` / `wcs-cli delete` use `list` and `delete:<id>`. On `RESIZED{PEER}`, `WinConsoleTerminal` keeps its buffer at the peer size and reasserts its own size on the next focus or key input (last-active-client-wins).
 
 ## 12. Minimal client checklist
 

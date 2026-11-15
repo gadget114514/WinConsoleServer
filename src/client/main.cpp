@@ -436,6 +436,97 @@ void AttachSession() {
     StartConnection(g.host, g.port, target, g.token);
 }
 
+// Quote an argument for CreateProcessW's command line (CommandLineToArgvW
+// rules). Empty arguments are not needed here.
+std::wstring QuoteCommandLineArg(const std::wstring& arg) {
+    if (arg.find_first_of(L" \t\"") == std::wstring::npos) return arg;
+    std::wstring out = L"\"";
+    size_t backslashes = 0;
+    for (wchar_t ch : arg) {
+        if (ch == L'\\') {
+            ++backslashes;
+            continue;
+        }
+        if (ch == L'"') {
+            out.append(backslashes * 2 + 1, L'\\');
+            out.push_back(L'"');
+        } else {
+            out.append(backslashes, L'\\');
+            out.push_back(ch);
+        }
+        backslashes = 0;
+    }
+    out.append(backslashes * 2, L'\\');
+    out.push_back(L'"');
+    return out;
+}
+
+void AttachAllSessions() {
+    std::vector<wcs::SessionInfo> sessions;
+    std::wstring error;
+    if (!QuerySessions(sessions, &error)) {
+        MessageBoxW(g.hwnd, error.c_str(), L"Attach to all sessions", MB_ICONERROR);
+        return;
+    }
+
+    std::vector<const wcs::SessionInfo*> running;
+    for (const auto& session : sessions) {
+        if (session.state == 0) running.push_back(&session);
+    }
+    if (running.empty()) {
+        MessageBoxW(g.hwnd, L"There are no running retained sessions.",
+                    L"Attach to all sessions", MB_ICONINFORMATION);
+        return;
+    }
+
+    wchar_t exe[MAX_PATH] = {};
+    if (!GetModuleFileNameW(nullptr, exe, MAX_PATH)) {
+        MessageBoxW(g.hwnd, L"Cannot determine the executable path.",
+                    L"Attach to all sessions", MB_ICONERROR);
+        return;
+    }
+
+    const std::wstring exeArg = QuoteCommandLineArg(exe);
+    int launched = 0;
+    int failed = 0;
+    for (const auto* session : running) {
+        std::wstring cmd = exeArg;
+        cmd += L" --host ";
+        cmd += QuoteCommandLineArg(g.host);
+        cmd += L" --port ";
+        cmd += std::to_wstring(g.port);
+        if (!g.token.empty()) {
+            cmd += L" --token ";
+            cmd += QuoteCommandLineArg(g.token);
+        }
+        cmd += L" --shell ";
+        cmd += QuoteCommandLineArg(L"attach:" + std::to_wstring(session->id));
+        cmd += L" --connect";
+
+        std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
+        mutableCmd.push_back(L'\0');
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+        if (CreateProcessW(exe, mutableCmd.data(), nullptr, nullptr, FALSE, 0,
+                           nullptr, nullptr, &si, &pi)) {
+            ++launched;
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        } else {
+            ++failed;
+        }
+    }
+
+    SetStatus(L"opened " + std::to_wstring(launched) + L" session window(s)", 0);
+    if (failed > 0) {
+        MessageBoxW(g.hwnd,
+                    (L"Failed to open " + std::to_wstring(failed) +
+                     L" session window(s).").c_str(),
+                    L"Attach to all sessions", MB_ICONWARNING);
+    }
+}
+
 void CloseSession() {
     if (!g.session) {
         SetStatus(L"no session", 0);
@@ -501,6 +592,9 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case IDM_ATTACH:
             AttachSession();
             return 0;
+        case IDM_ATTACH_ALL:
+            AttachAllSessions();
+            return 0;
         case IDM_CONNECT:
             ShowConnectDialog();
             return 0;
@@ -522,7 +616,8 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case IDM_ABOUT:
             MessageBoxW(hwnd,
-                        L"WinConsoleTerminal 0.1\nNative Win32 terminal for WinConsoleServer.",
+                        L"WinConsoleTerminal " WCS_VERSION_W
+                        L"\nNative Win32 terminal for WinConsoleServer.",
                         L"About", MB_ICONINFORMATION);
             return 0;
         default:
